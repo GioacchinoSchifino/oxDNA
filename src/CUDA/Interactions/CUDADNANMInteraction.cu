@@ -9,6 +9,16 @@
 
 #include <algorithm>
 #include <fstream>
+#include <set>
+#include <sstream>
+#include <vector>
+#include <cstring>
+#include <limits>
+#include <cctype>
+#include <cmath>
+#include <cstdlib>
+#include <cerrno>
+
 
 CUDADNANMInteraction::CUDADNANMInteraction(bool btp) : DNANMInteraction(btp), CUDABaseInteraction() {
     
@@ -70,8 +80,16 @@ CUDADNANMInteraction::~CUDADNANMInteraction() {
     if(_h_aff_eqdist != NULL) delete[] _h_aff_eqdist;
     if(_h_affected_indx != NULL) delete[] _h_affected_indx;
 
+    if(_d_anm_v9_physical_to_slot != nullptr) CUDA_SAFE_CALL(cudaFree(_d_anm_v9_physical_to_slot));
+    if(_d_anm_v9_map_errors != nullptr) CUDA_SAFE_CALL(cudaFree(_d_anm_v9_map_errors));
     if(_d_is_strand_end != nullptr) {
         CUDA_SAFE_CALL(cudaFree(_d_is_strand_end));
+    }
+    if(_d_protein_charge != nullptr) {
+        CUDA_SAFE_CALL(cudaFree(_d_protein_charge));
+    }
+    if(_d_protein_group != nullptr) {
+        CUDA_SAFE_CALL(cudaFree(_d_protein_group));
     }
 }
 
@@ -85,10 +103,24 @@ void CUDADNANMInteraction::get_settings(input_file &inp) {
     char s[5] = "none";
     if(strcmp(this->_parameterfile, s) != 0) _read_par = true;
 
-    if (!getInputString(&inp, "topology", this->_topology_filename, 0) == KEY_FOUND){
+    if(getInputString(&inp, "topology", this->_topology_filename, 0) != KEY_FOUND){
         throw oxDNAException("Key 'topology_file' not found.");
     }
     DNANMInteraction::get_settings(inp);
+    // RC3 global DNACT is selected in the input, without environment opt-in.
+    // Unsupported configurations cannot bypass this contract.
+    if(_angular) {
+        if(_parameter_kbkt || !_read_par)
+            throw oxDNAException("DNACT CUDA requires GLOBAL stiffness and a validated ANM parameter file; per-bond stiffness is not qualified");
+#ifdef CUDA_DOUBLE_PRECISION
+        std::string dnact_precision = "double";
+#else
+        std::string dnact_precision = "mixed";
+#endif
+        getInputString(&inp, "backend_precision", dnact_precision, 0);
+        if(dnact_precision != "mixed")
+            throw oxDNAException("DNACT CUDA requires backend_precision = mixed in this release");
+    }
 
     _use_debye_huckel = true;
     _use_oxDNA2_coaxial_stacking = true;
@@ -97,7 +129,7 @@ void CUDADNANMInteraction::get_settings(input_file &inp) {
     // we don't need the F4_... terms as the macros are used in the CUDA_DNA.cuh file; this doesn't apply for the F2_K term
     F2_K[1] = CXST_K_OXDNA2;
     _debye_huckel_half_charged_ends = true;
-    this->_grooving = true;
+    // C11: retain the grooving choice parsed by DNAInteraction::get_settings.
     // end copy from DNA2Interaction
 
     // copied from DNA2Interaction::get_settings() (CPU), the least bad way of doing things
@@ -111,10 +143,49 @@ void CUDADNANMInteraction::get_settings(input_file &inp) {
     // the prefactor to the Debye-Huckel term
     _debye_huckel_prefactor = 0.0543f;
     getInputFloat(&inp, "dh_strength", &_debye_huckel_prefactor, 0);
+    if(!std::isfinite(static_cast<double>(_salt_concentration)) ||
+       _salt_concentration <= 0 ||
+       !std::isfinite(static_cast<double>(_debye_huckel_lambdafactor)) ||
+       _debye_huckel_lambdafactor <= 0 ||
+       !std::isfinite(static_cast<double>(_debye_huckel_prefactor)) ||
+       _debye_huckel_prefactor <= 0)
+        throw oxDNAException("Invalid CUDA DNANM/DNACT Debye-Huckel input");
+
+    if(this->_protein_dna_electrostatics || this->_protein_protein_electrostatics) {
+        number requested_rhigh = (number) 0.;
+        if(getInputNumber(&inp, "debye_huckel_rhigh", &requested_rhigh, 0) == KEY_FOUND)
+            throw oxDNAException("CUDA protein-DNA electrostatics requires derived debye_huckel_rhigh");
+    }
+
+
+    // Only the unsorted execution path is qualified for this release.
+    int anm_cuda_sort_interval = 0;
+    getInputInt(&inp, "CUDA_sort_every", &anm_cuda_sort_interval, 0);
+    if(anm_cuda_sort_interval != 0)
+        throw oxDNAException("DNANM/DNACT CUDA requires CUDA_sort_every = 0 in this release");
+
 }
 
 
+
 void CUDADNANMInteraction::cuda_init(int N) {
+    // Re-entering cuda_init() on a temperature update must not leak ANM CSR.
+    if(_spring_potential != nullptr) { delete[] _spring_potential; _spring_potential = nullptr; }
+    if(_spring_eqdist != nullptr) { delete[] _spring_eqdist; _spring_eqdist = nullptr; }
+    if(_h_ang_params != nullptr) { delete[] _h_ang_params; _h_ang_params = nullptr; }
+    if(_h_ang_kbkt != nullptr) { delete[] _h_ang_kbkt; _h_ang_kbkt = nullptr; }
+    if(_affected_len != nullptr) { delete[] _affected_len; _affected_len = nullptr; }
+    if(_h_affected != nullptr) { delete[] _h_affected; _h_affected = nullptr; }
+    if(_h_aff_gamma != nullptr) { delete[] _h_aff_gamma; _h_aff_gamma = nullptr; }
+    if(_h_aff_eqdist != nullptr) { delete[] _h_aff_eqdist; _h_aff_eqdist = nullptr; }
+    if(_h_affected_indx != nullptr) { delete[] _h_affected_indx; _h_affected_indx = nullptr; }
+    if(_d_ang_params != nullptr) { CUDA_SAFE_CALL(cudaFree(_d_ang_params)); _d_ang_params = nullptr; }
+    if(_d_ang_kbkt != nullptr) { CUDA_SAFE_CALL(cudaFree(_d_ang_kbkt)); _d_ang_kbkt = nullptr; }
+    if(_d_affected != nullptr) { CUDA_SAFE_CALL(cudaFree(_d_affected)); _d_affected = nullptr; }
+    if(_d_aff_gamma != nullptr) { CUDA_SAFE_CALL(cudaFree(_d_aff_gamma)); _d_aff_gamma = nullptr; }
+    if(_d_aff_eqdist != nullptr) { CUDA_SAFE_CALL(cudaFree(_d_aff_eqdist)); _d_aff_eqdist = nullptr; }
+    if(_d_affected_indx != nullptr) { CUDA_SAFE_CALL(cudaFree(_d_affected_indx)); _d_affected_indx = nullptr; }
+
     CUDABaseInteraction::cuda_init(N);
     DNANMInteraction::init();
 
@@ -134,6 +205,146 @@ void CUDADNANMInteraction::cuda_init(int N) {
     if(this->_firststrand < 0) offset = 0;
     else if(this->_firststrand > 0) offset = this->ndna;
     else throw oxDNAException("No Strand should have an ID of 0");
+
+    // Fail closed on interleaved DNA/protein topology in *every* ES mode.
+    if(this->ndna + this->npro != N || this->npro < 0 || this->ndna < 0)
+        throw oxDNAException("ANM CUDA topology header particle counts inconsistent");
+    {
+        std::ifstream v9_topology(this->_topology_filename);
+        if(!v9_topology) throw oxDNAException("Cannot open ANM CUDA topology for validation");
+        std::string v9_row;
+        if(!std::getline(v9_topology,v9_row))
+            throw oxDNAException("Empty ANM CUDA topology");
+        int v9_seen=0;
+        while(std::getline(v9_topology,v9_row)) {
+            std::istringstream v9_record(v9_row);
+            int v9_strand=0;
+            if(!(v9_record >> v9_strand)) continue;
+            if(v9_seen >= N || v9_strand == 0)
+                throw oxDNAException("ANM CUDA unexpected extra row or zero strand");
+            const bool expected_protein = (v9_seen >= offset && v9_seen < offset+npro);
+            if((v9_strand < 0) != expected_protein)
+                throw oxDNAException("CUDA ANM expects all protein beads contiguous");
+            ++v9_seen;
+        }
+        if(v9_seen != N) throw oxDNAException("ANM CUDA topology row-count mismatch");
+    }
+    if(_angular) {
+        // CUDA edge lists omit n3/n5 pairs using the higher slot's list.
+        // Require reciprocal unordered protein links so an omitted pair is
+        // restored once at each endpoint. No CSR, adjacency or strand-number
+        // constraint is needed. The completion kernel deduplicates n3/n5.
+        std::ifstream angular_top(this->_topology_filename);
+        std::string row;
+        if(!angular_top || !std::getline(angular_top, row))
+            throw oxDNAException("Cannot validate DNACT CUDA backbone topology");
+        std::vector<int> n3(N, -1), n5(N, -1);
+        int seen = 0;
+        while(std::getline(angular_top, row)) {
+            std::istringstream record(row);
+            int strand;
+            if(!(record >> strand)) continue;
+            if(seen >= N) throw oxDNAException("Extra DNACT CUDA topology row");
+            std::string residue;
+            if(!(record >> residue >> n3[seen] >> n5[seen]))
+                throw oxDNAException("Malformed DNACT CUDA backbone row");
+            ++seen;
+        }
+        if(seen != N) throw oxDNAException("Incomplete DNACT CUDA backbone topology");
+        for(int g = offset; g < offset + npro; ++g) {
+            for(int target : {n3[g], n5[g]}) {
+                if(target == -1) continue;
+                if(target < offset || target >= offset + npro || target == g)
+                    throw oxDNAException("Invalid DNACT CUDA backbone neighbour at bead %d", g);
+                if(n3[target] != g && n5[target] != g)
+                    throw oxDNAException("Nonreciprocal DNACT CUDA backbone neighbour at bead %d", g);
+            }
+        }
+    }
+    // Protein-DNA electrostatics: optional, with zero changes to the ES-OFF path.
+    // The CUDA parent bypasses DNANMInteraction::read_topology(). Build its
+    // residue metadata here and reuse the SAME strict CPU charge-file parser.
+    if(_d_protein_charge != nullptr) {
+        CUDA_SAFE_CALL(cudaFree(_d_protein_charge));
+        _d_protein_charge = nullptr;
+    }
+    if(_d_protein_group != nullptr) {
+        CUDA_SAFE_CALL(cudaFree(_d_protein_group));
+        _d_protein_group = nullptr;
+    }
+    if(this->_protein_dna_electrostatics || this->_protein_protein_electrostatics) {
+        this->_protein_local_to_global.clear();
+        this->_protein_topology_strand.clear();
+        this->_protein_residue_code.clear();
+        std::ifstream electro_top(this->_topology_filename);
+        if(!electro_top) throw oxDNAException("Cannot open topology for CUDA protein-DNA electrostatics");
+        std::string line;
+        if(!std::getline(electro_top, line)) throw oxDNAException("Empty DNANM topology");
+        int seen = 0;
+        while(std::getline(electro_top, line)) {
+            std::istringstream record(line);
+            int strand;
+            if(!(record >> strand)) continue;
+            if(strand == 0) throw oxDNAException("Unexpected strand zero in protein-DNA topology");
+            std::string aa;
+            if(!(record >> aa)) throw oxDNAException("Invalid residue in protein-DNA topology");
+            if(strand < 0) {
+                if(aa.size() != 1) throw oxDNAException("Electrostatic protein residue code must have one character");
+                this->_protein_local_to_global.push_back(seen);
+                this->_protein_topology_strand.push_back(strand);
+                this->_protein_residue_code.push_back(static_cast<char>(
+                    std::toupper(static_cast<unsigned char>(aa[0]))));
+            }
+            ++seen;
+        }
+        if(seen != N || static_cast<int>(this->_protein_local_to_global.size()) != this->npro)
+            throw oxDNAException("CUDA electrostatic topology size mismatch");
+        for(int li=0; li<this->npro; ++li)
+            if(this->_protein_local_to_global[li] != offset+li)
+                throw oxDNAException("CUDA ANM electrostatics requires contiguous protein topology block");
+        this->_load_protein_charge_file(N);
+        if(static_cast<int>(this->_protein_charge_reduced.size()) != N)
+            throw oxDNAException("CUDA charge buffer length mismatch");
+        const double factor = static_cast<double>(this->_protein_dna_dh_scale);
+        if(!(factor >= 0.) || factor > static_cast<double>(std::numeric_limits<c_number>::max()))
+            throw oxDNAException("Invalid CUDA protein-DNA electrostatic scaling");
+        _cuda_protein_dna_dh_scale = static_cast<c_number>(factor);
+        const double pp_factor = static_cast<double>(this->_protein_protein_dh_scale);
+        if(!(pp_factor >= 0.) || !std::isfinite(pp_factor) ||
+           pp_factor > static_cast<double>(std::numeric_limits<c_number>::max()))
+            throw oxDNAException("Invalid CUDA protein-protein electrostatic scaling");
+        _cuda_protein_protein_dh_scale = static_cast<c_number>(pp_factor);
+        if(static_cast<int>(this->_protein_group.size()) != N)
+            throw oxDNAException("CUDA protein group buffer length mismatch");
+        std::vector<int> groups = this->_protein_group;
+        std::vector<c_number> charges(N, (c_number) 0.f);
+        for(int i=0;i<N;++i) {
+            const double val = static_cast<double>(this->_protein_charge_reduced[i]);
+            if(std::fabs(val) > static_cast<double>(std::numeric_limits<c_number>::max()))
+                throw oxDNAException("CUDA reduced protein charge out of range at particle %d",i);
+            charges[i] = static_cast<c_number>(val);
+        }
+        long double largest_charge = 0.0L;
+        for(const c_number charge : charges) {
+            largest_charge = std::max(largest_charge,
+                std::fabs(static_cast<long double>(charge)));
+        }
+        const long double max_cuda =
+            static_cast<long double>(std::numeric_limits<c_number>::max());
+        if(this->_protein_dna_electrostatics &&
+           static_cast<long double>(_cuda_protein_dna_dh_scale) * largest_charge > max_cuda)
+            throw oxDNAException("CUDA protein-DNA charge product exceeds c_number range");
+        if(this->_protein_protein_electrostatics &&
+           static_cast<long double>(_cuda_protein_protein_dh_scale) * largest_charge * largest_charge > max_cuda)
+            throw oxDNAException("CUDA protein-protein charge product exceeds c_number range");
+        CUDA_SAFE_CALL(cudaMalloc(&_d_protein_charge, N*sizeof(c_number)));
+        CUDA_SAFE_CALL(cudaMemcpy(_d_protein_charge, charges.data(),
+                                 N*sizeof(c_number), cudaMemcpyHostToDevice));
+        CUDA_SAFE_CALL(cudaMalloc(&_d_protein_group, N*sizeof(int)));
+        CUDA_SAFE_CALL(cudaMemcpy(_d_protein_group, groups.data(),
+                                 N*sizeof(int), cudaMemcpyHostToDevice));
+    }
+
 
 
     if(_read_par){
@@ -175,8 +386,8 @@ void CUDADNANMInteraction::cuda_init(int N) {
         };
 
         auto valid_spring_params = [](int num_particles, int x, int y, double d, char s, double k){
-            if(x < 0 || x > num_particles) throw oxDNAException("Invalid Particle ID %d in Parameter File", x);
-            if(y < 0 || y > num_particles) throw oxDNAException("Invalid Particle ID %d in Parameter File", y);
+            if(x < 0 || x >= num_particles) throw oxDNAException("Invalid Particle ID %d in Parameter File", x);
+            if(y < 0 || y >= num_particles) throw oxDNAException("Invalid Particle ID %d in Parameter File", y);
             if(d < 0) throw oxDNAException("Invalid Eq Distance %d in Parameter File", d);
             if(s != 's') throw oxDNAException("Potential Type %c Not Supported", s);
             if(k < 0) throw oxDNAException("Spring Constant %f Not Supported", k);
@@ -191,6 +402,7 @@ void CUDADNANMInteraction::cuda_init(int N) {
 
         //total connections
         int spring_connection_num = 0;
+        std::set<std::pair<int,int>> anm_seen_edges;
 
         //allocate and declare affected_len vector
         _affected_len = new int[this->npro]();
@@ -211,6 +423,18 @@ void CUDADNANMInteraction::cuda_init(int N) {
                     key1 -= offset;
                     key2 -= offset;
                 }
+                if(key1 < 0 || key1 >= this->npro ||
+                   key2 < 0 || key2 >= this->npro)
+                    throw oxDNAException("ANM spring endpoint outside protein-local range");
+                if(!std::isfinite(static_cast<double>(dist)) || dist <= 0 ||
+                   !std::isfinite(static_cast<double>(potential)) || potential < 0)
+                    throw oxDNAException("Invalid ANM spring distance or stiffness");
+                // Enforce one edge per unordered bead pair before updating
+                // CSR counters; duplicates otherwise desynchronise offsets.
+                if(key1 == key2)
+                    throw oxDNAException("ANM self-spring is invalid");
+                if(!anm_seen_edges.insert(std::minmax(key1,key2)).second)
+                    throw oxDNAException("Duplicate ANM spring edge");
 
                 _affected_len[key1] += 1;
                 _affected_len[key2] += 1;
@@ -244,11 +468,16 @@ void CUDADNANMInteraction::cuda_init(int N) {
                 _spring_eqdist[key2*this->npro + key1] = dist;
 
             }
+            if(!parameters.eof())
+                throw oxDNAException("Malformed or unsupported CUDA ANM parameter row; cannot silently truncate spring network");
             parameters.close();
         } else {
             throw oxDNAException("ParameterFile Could Not Be Opened");
         }
 
+        if (spring_connection_num == 0) {
+            throw oxDNAException("CUDA ANM zero-spring file is not qualified; use parfile=none");
+        }
         //Compressed Parameter Initialization
         _h_affected_indx = new int[this->npro + 1]();
         _h_affected = new int[spring_connection_num*2]();
@@ -290,11 +519,11 @@ void CUDADNANMInteraction::cuda_init(int N) {
         CUDA_SAFE_CALL(cudaMalloc(&_d_affected, 2 * spring_connection_num * sizeof(int)));
         CUDA_SAFE_CALL(cudaMemcpy(_d_affected, _h_affected, 2 * spring_connection_num * sizeof(int), cudaMemcpyHostToDevice));
 
-        CUDA_SAFE_CALL(cudaMalloc(&_d_aff_gamma, 2 * spring_connection_num * sizeof(int)));
-        CUDA_SAFE_CALL(cudaMemcpy(_d_aff_gamma, _h_aff_gamma, 2 * spring_connection_num * sizeof(int), cudaMemcpyHostToDevice));
+        CUDA_SAFE_CALL(cudaMalloc(&_d_aff_gamma, 2 * spring_connection_num * sizeof(c_number)));
+        CUDA_SAFE_CALL(cudaMemcpy(_d_aff_gamma, _h_aff_gamma, 2 * spring_connection_num * sizeof(c_number), cudaMemcpyHostToDevice));
 
-        CUDA_SAFE_CALL(cudaMalloc(&_d_aff_eqdist, 2 * spring_connection_num * sizeof(int)));
-        CUDA_SAFE_CALL(cudaMemcpy(_d_aff_eqdist, _h_aff_eqdist, 2 * spring_connection_num * sizeof(int), cudaMemcpyHostToDevice));
+        CUDA_SAFE_CALL(cudaMalloc(&_d_aff_eqdist, 2 * spring_connection_num * sizeof(c_number)));
+        CUDA_SAFE_CALL(cudaMemcpy(_d_aff_eqdist, _h_aff_eqdist, 2 * spring_connection_num * sizeof(c_number), cudaMemcpyHostToDevice));
 
         int ind = 0;
         _h_affected_indx[0] = 0;
@@ -454,12 +683,16 @@ void CUDADNANMInteraction::cuda_init(int N) {
     CUDA_SAFE_CALL( cudaMemcpyToSymbol(MD_pro_backbone_rc, &_pro_backbone_rcut, sizeof(float)) );
     CUDA_SAFE_CALL( cudaMemcpyToSymbol(MD_pro_backbone_b, &_pro_backbone_b, sizeof(float)) );
     CUDA_SAFE_CALL( cudaMemcpyToSymbol(MD_pro_backbone_sqr_rcut, &_pro_backbone_sqr_rcut, sizeof(float)) );
+    const float pd_backbone_stiffness_device = static_cast<float>(_pro_backbone_stiffness);
+    CUDA_SAFE_CALL( cudaMemcpyToSymbol(MD_pro_backbone_stiffness, &pd_backbone_stiffness_device, sizeof(float)) );
 
     CUDA_SAFE_CALL( cudaMemcpyToSymbol(MD_pro_base_sigma, &_pro_base_sigma, sizeof(float)) );
     CUDA_SAFE_CALL( cudaMemcpyToSymbol(MD_pro_base_rstar, &_pro_base_rstar, sizeof(float)) );
     CUDA_SAFE_CALL( cudaMemcpyToSymbol(MD_pro_base_rc, &_pro_base_rcut, sizeof(float)) );
     CUDA_SAFE_CALL( cudaMemcpyToSymbol(MD_pro_base_b, &_pro_base_b, sizeof(float)) );
     CUDA_SAFE_CALL( cudaMemcpyToSymbol(MD_pro_base_sqr_rcut, &_pro_base_sqr_rcut, sizeof(float)) );
+    const float pd_base_stiffness_device = static_cast<float>(_pro_base_stiffness);
+    CUDA_SAFE_CALL( cudaMemcpyToSymbol(MD_pro_base_stiffness, &pd_base_stiffness_device, sizeof(float)) );
 
     CUDA_SAFE_CALL( cudaMemcpyToSymbol(MD_dna_sqr_rcut, &this->_sqr_rcut, sizeof(float)) );
 
@@ -467,9 +700,43 @@ void CUDADNANMInteraction::cuda_init(int N) {
     CUDA_SAFE_CALL( cudaMemcpyToSymbol(_ndna, &this->ndna, sizeof(int)) );
     CUDA_SAFE_CALL( cudaMemcpyToSymbol(_npro, &this->npro, sizeof(int)) );
     CUDA_SAFE_CALL( cudaMemcpyToSymbol(_offset, &this->offset, sizeof(int)) );
+    // RC1: physics potential always accumulated; no runtime energy mask.
+
+    if(!_anm_v9_list_cutoff_recorded) {
+        _anm_v9_initial_list_cutoff = get_cuda_rcut();
+        _anm_v9_list_cutoff_recorded = true;
+    }
 }
 
 void CUDADNANMInteraction::compute_forces(CUDABaseList *lists, c_number4 *d_poss, GPU_quat *d_orientations, c_number4 *d_forces, c_number4 *d_torques, LR_bonds *d_bonds, CUDABox *d_box) {
+    // Reconstruct and validate a bijective physical-ID -> CUDA-slot map
+    // on every force call, including immediately after Hilbert sorting.
+    if(_d_anm_v9_physical_to_slot == nullptr) {
+        CUDA_SAFE_CALL(cudaMalloc(&_d_anm_v9_physical_to_slot, sizeof(int) * _N));
+    }
+    if(_d_anm_v9_map_errors == nullptr) {
+        CUDA_SAFE_CALL(cudaMalloc(&_d_anm_v9_map_errors, 2 * sizeof(int)));
+    }
+    CUDA_SAFE_CALL(cudaMemset(_d_anm_v9_physical_to_slot, 0xff, sizeof(int) * _N));
+    CUDA_SAFE_CALL(cudaMemset(_d_anm_v9_map_errors, 0, 2 * sizeof(int)));
+    dnanm_v9_build_slotmap<<<_launch_cfg.blocks, _launch_cfg.threads_per_block>>>(
+        d_poss, _d_anm_v9_physical_to_slot, _d_anm_v9_map_errors, _N);
+    dnanm_v9_check_slotmap<<<_launch_cfg.blocks, _launch_cfg.threads_per_block>>>(
+        d_poss, _d_anm_v9_physical_to_slot, _d_anm_v9_map_errors, _N);
+    CUDA_SAFE_CALL(cudaGetLastError());
+    int anm_v9_map_errors[2] = {0,0};
+    CUDA_SAFE_CALL(cudaMemcpy(anm_v9_map_errors, _d_anm_v9_map_errors,
+                              2 * sizeof(int), cudaMemcpyDeviceToHost));
+    if(anm_v9_map_errors[0] != 0 || anm_v9_map_errors[1] != 0)
+        throw oxDNAException("ANM sorting invalid physical-ID map: duplicates/invalid=%d, missing=%d",
+                              anm_v9_map_errors[0], anm_v9_map_errors[1]);
+    // DNA termini are slot-addressed by nonbonded kernels: update after sort.
+    if(_d_is_strand_end == nullptr) _init_strand_ends(d_bonds);
+    else {
+        dna_init_DNA_strand_ends<<<_launch_cfg.blocks, _launch_cfg.threads_per_block>>>(
+            _d_is_strand_end, d_bonds, _N);
+        CUDA_SAFE_CALL(cudaGetLastError());
+    }
     if(_d_is_strand_end == nullptr) {
         _init_strand_ends(d_bonds);
     }
@@ -485,13 +752,25 @@ void CUDADNANMInteraction::compute_forces(CUDABaseList *lists, c_number4 *d_poss
             dnanm_forces_edge_nonbonded
             <<<(lists->N_edges - 1)/(_launch_cfg.threads_per_block) + 1, _launch_cfg.threads_per_block>>>
                     (d_poss, d_orientations, d_forces, d_torques, lists->d_edge_list, lists->N_edges, _d_is_strand_end,
-                     _grooving, _use_debye_huckel, _use_oxDNA2_coaxial_stacking, _update_st, _d_st, d_box);
+                     _grooving, _use_debye_huckel, _use_oxDNA2_coaxial_stacking,
+                     _d_protein_charge, _d_protein_group,
+                     this->_protein_dna_electrostatics, this->_protein_protein_electrostatics,
+                     this->_exclude_intragroup_electrostatics,
+                     _cuda_protein_dna_dh_scale, _cuda_protein_protein_dh_scale,
+                     _d_affected_indx, _d_affected,
+                     _update_st, _d_st, d_box);
         }
         else { // sum required, somewhat slower
             dnanm_forces_edge_nonbonded
             <<<(lists->N_edges - 1)/(_launch_cfg.threads_per_block) + 1, _launch_cfg.threads_per_block>>>
                     (d_poss, d_orientations, _d_edge_forces, _d_edge_torques, lists->d_edge_list, lists->N_edges, _d_is_strand_end,
-                     _grooving, _use_debye_huckel, _use_oxDNA2_coaxial_stacking, _update_st, _d_st, d_box);
+                     _grooving, _use_debye_huckel, _use_oxDNA2_coaxial_stacking,
+                     _d_protein_charge, _d_protein_group,
+                     this->_protein_dna_electrostatics, this->_protein_protein_electrostatics,
+                     this->_exclude_intragroup_electrostatics,
+                     _cuda_protein_dna_dh_scale, _cuda_protein_protein_dh_scale,
+                     _d_affected_indx, _d_affected,
+                     _update_st, _d_st, d_box);
 
             _sum_edge_forces_torques(d_forces, d_torques);
         }
@@ -501,10 +780,46 @@ void CUDADNANMInteraction::compute_forces(CUDABaseList *lists, c_number4 *d_poss
                 (d_poss, d_orientations, d_forces, d_torques, d_bonds, _grooving, _use_oxDNA2_FENE, _use_mbf, _mbf_xmax,
                  _mbf_finf, _update_st, _d_st);
 
+        if (_read_par) {
+            if (_d_aff_eqdist == nullptr || _d_aff_gamma == nullptr ||
+                _d_affected_indx == nullptr || _d_affected == nullptr ||
+                _d_anm_v9_physical_to_slot == nullptr) {
+                throw oxDNAException("CUDA ANM CSR pointers missing with active parfile");
+            }
         protein_forces_edge_bonded
         <<<_launch_cfg.blocks, _launch_cfg.threads_per_block>>>
                 (d_poss, d_orientations, d_forces, d_torques, d_bonds, _grooving, _use_oxDNA2_FENE, _use_mbf, _mbf_xmax,
-                 _mbf_finf, d_box, _update_st, _d_st, _d_aff_eqdist, _d_aff_gamma, _d_affected_indx, _d_affected);
+                 _mbf_finf, d_box, _update_st, _d_st, _d_aff_eqdist, _d_aff_gamma, _d_affected_indx, _d_affected,
+                     _d_anm_v9_physical_to_slot);
+        }
+        // CPU-equivalent DNACT bending/torsion contribution. This is
+        // deliberately separate from the ANM spring kernel.
+        if(_angular) {
+            if(!_read_par || _d_ang_params == nullptr ||
+               _d_affected_indx == nullptr || _d_affected == nullptr) {
+                throw oxDNAException(
+                    "DNACT CUDA angular candidate requires a validated ANM parameter file"
+                );
+            }
+            dnact_protein_excluded_pairs
+                <<<_launch_cfg.blocks, _launch_cfg.threads_per_block>>>(
+                    d_poss, d_forces, d_bonds, d_box,
+                    _d_protein_charge, _d_protein_group,
+                    this->_protein_protein_electrostatics,
+                    this->_exclude_intragroup_electrostatics,
+                    _cuda_protein_protein_dh_scale,
+                    _d_affected_indx, _d_affected,
+                    _update_st, _d_st
+                );
+            dnact_protein_angular_forces_candidate
+                <<<_launch_cfg.blocks, _launch_cfg.threads_per_block>>>(
+                    d_poss, d_orientations, d_forces, d_torques, d_box,
+                    _d_ang_params, _d_ang_kbkt,
+                    _d_affected_indx, _d_affected,
+                    _update_st, _d_st,
+                    _d_anm_v9_physical_to_slot
+                );
+        }
     } else throw oxDNAException("Edge Approach is only implemented for DNANM Interaction using CUDA approach. Please add use_edge = 1 to your input file.");
 
 
@@ -523,7 +838,12 @@ void CUDADNANMInteraction::compute_forces(CUDABaseList *lists, c_number4 *d_poss
 }
 
 void CUDADNANMInteraction::_on_T_update() {
+    // The backend's neighbour matrix was allocated for the initial cutoff.
+    // Rebuild constants and ANM buffers, but NEVER silently exceed its radius.
+    if(!_anm_v9_list_cutoff_recorded) throw oxDNAException("ANM cutoff not initialized");
     cuda_init(_N);
+    if(get_cuda_rcut() > _anm_v9_initial_list_cutoff + (c_number) 1.e-6)
+        throw oxDNAException("ANM temperature/salt update enlarges cutoff: restart to rebuild CUDA neighbour lists");
 }
 
 void CUDADNANMInteraction::_init_strand_ends(LR_bonds *d_bonds) {

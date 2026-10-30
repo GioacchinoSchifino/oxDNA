@@ -14,8 +14,8 @@
  * Input options:
  *
  * @verbatim
- parfile = string (set parameter file for protein component, set to none for DNA only sims)
- massfile = string (set massfile for simulations w/ different massed items)
+ parfile = string (required; DNANM accepts explicit none, DNACT requires a valid parameter file)
+ massfile = string (optional unit-mass table; non-unit protein masses are not supported)
  topology = mixed legacy topology format:
             <N> <N_strands> <ndna> <npro> <ndnas>
  */
@@ -24,6 +24,7 @@
 #define DNANM_INTERACTION_H
 
 #include "DNA2Interaction.h"
+#include <vector>
 
 
 class DNANMInteraction: public DNA2Interaction {
@@ -45,18 +46,77 @@ protected:
     number _k_bend, _k_tor;
     std::map<int, std::vector <double> > _ang_vals;
     number _pro_sigma, _pro_rstar, _pro_b, _pro_rcut; // Protein-protein quartic LJ params same as in ANM
-    number _pro_base_sqr_rcut, _pro_backbone_sqr_rcut, _pro_sqr_rcut, _pro_dna_sqr_rcut;
+    number _pro_base_sqr_rcut, _pro_backbone_sqr_rcut, _pro_sqr_rcut, _pro_dna_sqr_rcut, _pro_pro_sqr_rcut;
+
+    // Optional screened protein electrostatics.
+    // Disabled by default for strict backward compatibility.
+    // Opt-in diagnostic parity mode: use analytic f4 only for native DNA
+    // cross-stacking angular factors in DNANM/DNACT. Default remains mesh.
+    bool _analytic_cross_stacking;
+    number _custom_f4(number cost, int i) override;
+    number _custom_f4D(number cost, int i) override;
+
+    bool _protein_dna_electrostatics;
+    bool _protein_protein_electrostatics;
+    bool _exclude_intragroup_electrostatics;
+
+    number _protein_charge_scale;
+    number _protein_dna_dh_scale;
+    number _protein_protein_dh_scale;
+    number _dna_effective_charge_e;
+
+    std::string _protein_charge_file;
+
+    // Indexed in global particle space.
+    std::vector<number> _protein_charge_reduced;
+    std::vector<int> _protein_group;
+
+    // Explicit mapping from protein-local charge-file indices
+    // to the mixed DNANM/DNACT topology.
+    std::vector<int> _protein_local_to_global;
+    std::vector<int> _protein_topology_strand;
+    std::vector<char> _protein_residue_code;
+
+    int _protein_charge_format_version;
+    std::string _protein_charge_model;
+    std::string _protein_charge_source;
+
+    void _load_protein_charge_file(int total_particles);
+    void _update_electrostatic_cutoffs();
+
+    number _scaled_debye_huckel(
+        const LR_vector &r,
+        number charge_product,
+        LR_vector &force,
+        bool update_forces
+    );
+
+    number _protein_dna_debye_huckel(
+        BaseParticle *p,
+        BaseParticle *q,
+        bool compute_r,
+        bool update_forces
+    );
+
+    number _protein_protein_debye_huckel(
+        BaseParticle *p,
+        BaseParticle *q,
+        bool compute_r,
+        bool update_forces
+    );
 
 public:
     enum {
         SPRING = 8,
         PRO_EXC_VOL = 9,
         PRO_DNA_EXC_VOL = 10,
-        PRO_ANG_POT = 11
+        PRO_ANG_POT = 11,
+        PRO_DNA_DH = 12,
+        PRO_PRO_DH = 13
         //Assigned 8 9 and 10 so it won't overwrite the already existing DNA function pointers in the _int_map
     };
 
-    char _parameterfile[512];
+    char _parameterfile[512] = {};
     std::string _massfile;
     bool _angular;
 
@@ -70,6 +130,8 @@ public:
     void read_parameter_file(std::vector<BaseParticle *> &particles);
 
     number pair_interaction(BaseParticle *p, BaseParticle *q, bool compute_r, bool update_forces) override;
+    number pair_interaction_term(int name, BaseParticle *p, BaseParticle *q,
+                                 bool compute_r = true, bool update_forces = false) override;
     number pair_interaction_bonded(BaseParticle *p, BaseParticle *q, bool compute_r, bool update_forces) override;
     number pair_interaction_nonbonded(BaseParticle *p, BaseParticle *q, bool compute_r, bool update_forces) override;
     number _protein_dna_exc_volume(BaseParticle *p,BaseParticle *q, bool compute_r, bool update_forces);

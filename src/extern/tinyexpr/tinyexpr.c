@@ -87,7 +87,12 @@ typedef struct state {
 static te_expr *new_expr(const int type, const te_expr *parameters[]) {
     const int arity = ARITY(type);
     const int psize = sizeof(void*) * arity;
-    const int size = (sizeof(te_expr) - sizeof(void*)) + psize + (IS_CLOSURE(type) ? sizeof(void*) : 0);
+    /* oxDNA-ANM hardening: te_expr contains parameters[1]. Even arity 0
+     * must allocate the complete structure; closures need an extra slot.
+     * Preserve the original AST layout and expression semantics. */
+    const size_t size = sizeof(te_expr)
+        + (size_t)(arity > 0 ? arity - 1 : 0) * sizeof(void *)
+        + (IS_CLOSURE(type) ? sizeof(void *) : 0);
     te_expr *ret = malloc(size);
     CHECK_NULL(ret);
 

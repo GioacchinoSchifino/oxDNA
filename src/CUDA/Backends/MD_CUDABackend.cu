@@ -1,3 +1,12 @@
+#include <algorithm>
+#include <fstream>
+#include <iomanip>
+#include <vector>
+#include <cmath>
+#include <cstdlib>
+#include <cstring>
+#include <cstdlib>
+#include <cstring>
 /*
  * MD_CUDABackend.cpp
  *
@@ -35,6 +44,7 @@ MD_CUDABackend::MD_CUDABackend() :
 	_d_buff_particles_to_mols = nullptr;
 
 	_d_ext_forces = nullptr;
+	_g50r_p2s = _g50r_s2p = _g50r_buff_s2p = nullptr;
 
 	_avoid_cpu_calculations = false;
 
@@ -81,6 +91,11 @@ MD_CUDABackend::~MD_CUDABackend() {
 		}
 	}
 
+	if(_g50r_p2s != nullptr) {
+        CUDA_SAFE_CALL(cudaFree(_g50r_p2s));
+        CUDA_SAFE_CALL(cudaFree(_g50r_s2p));
+        CUDA_SAFE_CALL(cudaFree(_g50r_buff_s2p));
+    }
 	if(_h_vels != nullptr) {
 		delete[] _h_vels;
 		delete[] _h_Ls;
@@ -108,8 +123,15 @@ void MD_CUDABackend::_gpu_to_host() {
 void MD_CUDABackend::_apply_external_forces_changes() {
 	if(_external_forces) {
 		if(_sort_every > 0) {
-			throw oxDNAException("External forces and CUDA_sort_every > 0 are not compatible");
-		}
+            // Fail closed for all other external forces; only MutualTrap is
+            // currently qualified for physical-index/slot remapping.
+            for(int physical=0;physical<N();++physical) {
+                for(auto *force : _particles[physical]->ext_forces) {
+                    if(typeid(*force) != typeid(MutualTrap))
+                        throw oxDNAException("G50R sorting supports only mutual_trap external forces");
+                }
+            }
+        }
 		bool first_time = (_d_ext_forces == nullptr);
 
 		static std::vector<CUDA_trap> h_ext_forces(N() * MAX_EXT_FORCES);
@@ -450,6 +472,15 @@ void MD_CUDABackend::_rescale_positions(c_number4 new_Ls, c_number4 old_Ls) {
 
 void MD_CUDABackend::_apply_barostat() {
 	_barostat_attempts++;
+    // Research-only MC transaction auditing. Activated only in isolated NPT sandbox.
+    const char *mc_audit_env = std::getenv("OXDNA_MC_AUDIT");
+    const bool mc_audit_enabled = mc_audit_env && std::strcmp(mc_audit_env, "1") == 0;
+    std::vector<c_number4> mc_pos_before;
+    if(mc_audit_enabled) {
+        mc_pos_before.resize(N());
+        CUDA_SAFE_CALL(cudaMemcpy(mc_pos_before.data(), _d_poss, sizeof(c_number4)*N(), cudaMemcpyDeviceToHost));
+    }
+
 
 	_set_external_forces();
 	_cuda_interaction->compute_forces(_cuda_lists, _d_poss, _d_orientations, _d_forces, _d_torques, _d_bonds, _d_cuda_box);
@@ -489,9 +520,17 @@ void MD_CUDABackend::_apply_barostat() {
 	c_number dE = new_energy - old_energy;
 	c_number dV = new_V - old_V;
 	int N_objs = (_barostat_molecular) ? _molecules.size() : N();
-	c_number acc = exp(-(dE + _P * dV - N_objs * _T * log(new_V / old_V)) / _T);
+	// RC2 RESEARCH-ONLY: symmetric isotropic side-length proposal targets dV NPT.
+    // Adds log |dV/dL| ratio = (2/3)*log(Vnew/Vold). For nonisotropic mode
+    // preserve legacy expression; that mode requires independent qualification.
+    const c_number rc2_ln_volume_ratio = log(new_V / old_V);
+    const c_number rc2_log_accept = -(dE + _P * dV - N_objs * _T * rc2_ln_volume_ratio) / _T
+        + (_barostat_isotropic ? (((c_number)2.0 / (c_number)3.0) * rc2_ln_volume_ratio) : (c_number)0.0);
+    c_number acc = exp(rc2_log_accept);
 	// accepted
-	if(acc > drand48()) {
+	const c_number mc_uniform = drand48();
+    const bool mc_accepted = acc > mc_uniform;
+    if(mc_accepted) {
 		_barostat_accepted++;
 		CONFIG_INFO->notify(CONFIG_INFO->box->UPDATE_EVENT);
 	}
@@ -507,6 +546,38 @@ void MD_CUDABackend::_apply_barostat() {
 		}
 		_cuda_lists->update(_d_poss, _d_list_poss, _d_bonds);
 	}
+
+    if(mc_audit_enabled) {
+        double mc_position_max_err = 0.0;
+        double mc_restore_energy_err = 0.0;
+        if(!mc_accepted) {
+            std::vector<c_number4> mc_pos_after(N());
+            CUDA_SAFE_CALL(cudaMemcpy(mc_pos_after.data(), _d_poss, sizeof(c_number4)*N(), cudaMemcpyDeviceToHost));
+            for(int k=0;k<N();++k) {
+                mc_position_max_err=std::max(mc_position_max_err,(double)std::fabs(mc_pos_after[k].x-mc_pos_before[k].x));
+                mc_position_max_err=std::max(mc_position_max_err,(double)std::fabs(mc_pos_after[k].y-mc_pos_before[k].y));
+                mc_position_max_err=std::max(mc_position_max_err,(double)std::fabs(mc_pos_after[k].z-mc_pos_before[k].z));
+            }
+            // Re-evaluate potential after rejected move and list rebuild.
+            _set_external_forces();
+            _cuda_interaction->compute_forces(_cuda_lists, _d_poss, _d_orientations,
+                _d_forces, _d_torques, _d_bonds, _d_cuda_box);
+            const double restored = GpuUtils::sum_c_number4_to_double_on_GPU(_d_forces,N())/2.;
+            mc_restore_energy_err = restored-old_energy;
+        }
+        std::ofstream mc_out("mc_audit.tsv",std::ios::app);
+        if(!mc_out.good()) throw oxDNAException("MC audit output could not be opened");
+        mc_out << std::setprecision(17)
+               << (long long)current_step() << '\t' << _barostat_attempts << '\t'
+               << old_Ls.x << '\t' << new_Ls.x << '\t'
+               << old_energy << '\t' << new_energy << '\t'
+               << old_V << '\t' << new_V << '\t'
+               << _P << '\t' << _T << '\t' << N_objs << '\t'
+               << acc << '\t' << mc_uniform << '\t' << (mc_accepted?1:0) << '\t'
+               << mc_position_max_err << '\t' << mc_restore_energy_err << '\n';
+        if(!mc_out.good()) throw oxDNAException("MC audit output write failed");
+    }
+
 	_barostat_acceptance = _barostat_accepted / (c_number) _barostat_attempts;
 
 	if(_cuda_barostat_always_refresh) {
@@ -528,12 +599,43 @@ void MD_CUDABackend::_forces_second_step() {
 void MD_CUDABackend::_set_external_forces() {
 	set_external_forces
 		<<<_particles_kernel_cfg.blocks, _particles_kernel_cfg.threads_per_block>>>
-		(_d_poss, _d_orientations, _d_ext_forces, _d_forces, _d_torques, current_step(), _max_ext_forces, _d_cuda_box);
+		(_d_poss, _d_orientations, _d_ext_forces, _d_forces, _d_torques, current_step(), _max_ext_forces, _d_cuda_box, _g50r_p2s, _g50r_s2p);
 	CUT_CHECK_ERROR("set_external_forces");
 }
 
 void MD_CUDABackend::_sort_particles() {
+	// GATE29 PRIVATE DIAGNOSTIC: read-only pre/post-sort audit.
+	const char *g29_env = std::getenv("OXDNA_GATE29_SORT_AUDIT");
+	const bool g29_audit = g29_env && std::strcmp(g29_env, "GATE29_RESEARCH_ONLY") == 0;
+	const int g29_N = N();
+	if(g29_audit && (g29_N < 2 || g29_N > 20000))
+		throw oxDNAException("G29 sort audit requires 2 <= N <= 20000");
+	std::vector<c_number4> g29_before_pos, g29_before_vel, g29_before_L;
+	std::vector<GPU_quat> g29_before_q;
+	std::vector<LR_bonds> g29_before_b;
+	std::vector<int> g29_before_m, g29_order, g29_inv;
+	if(g29_audit) {
+		g29_before_pos.resize(g29_N); g29_before_vel.resize(g29_N); g29_before_L.resize(g29_N);
+		g29_before_q.resize(g29_N); g29_before_b.resize(g29_N); g29_before_m.resize(g29_N);
+		g29_order.resize(g29_N); g29_inv.resize(g29_N);
+		CUDA_SAFE_CALL(cudaMemcpy(g29_before_pos.data(),_d_poss,_vec_size,cudaMemcpyDeviceToHost));
+		CUDA_SAFE_CALL(cudaMemcpy(g29_before_vel.data(),_d_vels,_vec_size,cudaMemcpyDeviceToHost));
+		CUDA_SAFE_CALL(cudaMemcpy(g29_before_L.data(),_d_Ls,_vec_size,cudaMemcpyDeviceToHost));
+		CUDA_SAFE_CALL(cudaMemcpy(g29_before_q.data(),_d_orientations,_orient_size,cudaMemcpyDeviceToHost));
+		CUDA_SAFE_CALL(cudaMemcpy(g29_before_b.data(),_d_bonds,_bonds_size,cudaMemcpyDeviceToHost));
+		CUDA_SAFE_CALL(cudaMemcpy(g29_before_m.data(),_d_particles_to_mols,sizeof(int)*g29_N,cudaMemcpyDeviceToHost));
+	}
 	CUDABaseBackend::_sort_index();
+	if(g29_audit) {
+		CUDA_SAFE_CALL(cudaMemcpy(g29_order.data(),_d_sorted_hindex,sizeof(int)*g29_N,cudaMemcpyDeviceToHost));
+		CUDA_SAFE_CALL(cudaMemcpy(g29_inv.data(),_d_inv_sorted_hindex,sizeof(int)*g29_N,cudaMemcpyDeviceToHost));
+		std::vector<int> seen(g29_N,0);
+		for(int k=0;k<g29_N;k++) {
+			const int j=g29_order[k];
+			if(j<0 || j>=g29_N || seen[j]++ != 0 || g29_inv[j] != k)
+				throw oxDNAException("G29_INVALID_HILBERT_BIJECTION");
+		}
+	}
 	permute_particles
 		<<<_particles_kernel_cfg.blocks, _particles_kernel_cfg.threads_per_block>>>
 		(_d_sorted_hindex, _d_inv_sorted_hindex, _d_poss, _d_vels, _d_Ls, _d_orientations, _d_bonds, _d_particles_to_mols,
@@ -547,6 +649,65 @@ void MD_CUDABackend::_sort_particles() {
 	CUDA_SAFE_CALL(cudaMemcpy(_d_vels, _d_buff_vels, _vec_size, cudaMemcpyDeviceToDevice));
 	CUDA_SAFE_CALL(cudaMemcpy(_d_Ls, _d_buff_Ls, _vec_size, cudaMemcpyDeviceToDevice));
 	CUDA_SAFE_CALL(cudaMemcpy(_d_particles_to_mols, _d_buff_particles_to_mols, sizeof(int) * N(), cudaMemcpyDeviceToDevice));
+    if(_g50r_p2s != nullptr) {
+        g50r_compose_external_maps<<<_particles_kernel_cfg.blocks, _particles_kernel_cfg.threads_per_block>>>
+            (_d_sorted_hindex, _g50r_s2p, _g50r_buff_s2p, _g50r_p2s);
+        CUT_CHECK_ERROR("G50R remap kernel");
+        CUDA_SAFE_CALL(cudaMemcpy(_g50r_s2p, _g50r_buff_s2p, sizeof(int)*N(), cudaMemcpyDeviceToDevice));
+        const char *flag=std::getenv("OXDNA_GATE50R_MAP_AUDIT");
+        if(flag && std::strcmp(flag,"G50R_AUDIT") == 0) {
+            std::vector<int> p2s(N()),s2p(N());
+            CUDA_SAFE_CALL(cudaMemcpy(p2s.data(), _g50r_p2s, sizeof(int)*N(),cudaMemcpyDeviceToHost));
+            CUDA_SAFE_CALL(cudaMemcpy(s2p.data(), _g50r_s2p, sizeof(int)*N(),cudaMemcpyDeviceToHost));
+            int moved=0;
+            for(int slot=0;slot<N();++slot) {
+                const int phys=s2p[slot];
+                if(phys<0 || phys>=N() || p2s[phys]!=slot)
+                    throw oxDNAException("G50R_NONBIJECTIVE_PHYSICAL_SLOT_MAP");
+                if(slot!=phys) ++moved;
+            }
+            std::ofstream ev("g50r_map_audit.tsv",std::ios::app);
+            if(!ev.good()) throw oxDNAException("G50R_AUDIT_FILE_OPEN_FAILED");
+            ev << "G50R_MAP_PASS\t" << (long long)current_step() << "\t" << N() << "\t" << moved << "\n";
+            if(!ev.good()) throw oxDNAException("G50R_AUDIT_FILE_WRITE_FAILED");
+        }
+    }
+	if(g29_audit) {
+		std::vector<c_number4> after_pos(g29_N),after_vel(g29_N),after_L(g29_N);
+		std::vector<GPU_quat> after_q(g29_N);
+		std::vector<LR_bonds> after_b(g29_N);
+		std::vector<int> after_m(g29_N);
+		CUDA_SAFE_CALL(cudaMemcpy(after_pos.data(),_d_poss,_vec_size,cudaMemcpyDeviceToHost));
+		CUDA_SAFE_CALL(cudaMemcpy(after_vel.data(),_d_vels,_vec_size,cudaMemcpyDeviceToHost));
+		CUDA_SAFE_CALL(cudaMemcpy(after_L.data(),_d_Ls,_vec_size,cudaMemcpyDeviceToHost));
+		CUDA_SAFE_CALL(cudaMemcpy(after_q.data(),_d_orientations,_orient_size,cudaMemcpyDeviceToHost));
+		CUDA_SAFE_CALL(cudaMemcpy(after_b.data(),_d_bonds,_bonds_size,cudaMemcpyDeviceToHost));
+		CUDA_SAFE_CALL(cudaMemcpy(after_m.data(),_d_particles_to_mols,sizeof(int)*g29_N,cudaMemcpyDeviceToHost));
+		int moved=0;
+		for(int k=0;k<g29_N;k++) {
+			const int j=g29_order[k];
+			if(j!=k) moved++;
+			if(std::memcmp(&after_pos[k],&g29_before_pos[j],sizeof(c_number4)) ||
+			   std::memcmp(&after_vel[k],&g29_before_vel[j],sizeof(c_number4)) ||
+			   std::memcmp(&after_L[k],&g29_before_L[j],sizeof(c_number4)) ||
+			   std::memcmp(&after_q[k],&g29_before_q[j],sizeof(GPU_quat)) ||
+			   after_m[k] != g29_before_m[j])
+				throw oxDNAException("G29_SORT_STATE_NOT_A_PERMUTATION");
+			const LR_bonds orig=g29_before_b[j];
+			if((orig.n3 != P_INVALID && (orig.n3 < 0 || orig.n3 >= g29_N)) ||
+			   (orig.n5 != P_INVALID && (orig.n5 < 0 || orig.n5 >= g29_N)))
+				throw oxDNAException("G29_INVALID_INITIAL_BOND_SLOT");
+			const int exp_n3=orig.n3 == P_INVALID ? P_INVALID : g29_inv[orig.n3];
+			const int exp_n5=orig.n5 == P_INVALID ? P_INVALID : g29_inv[orig.n5];
+			if(after_b[k].n3!=exp_n3 || after_b[k].n5!=exp_n5)
+				throw oxDNAException("G29_SORT_BOND_REMAP_MISMATCH");
+		}
+		std::ofstream ev("gate29_sort_audit.tsv",std::ios::app);
+		if(!ev.good()) throw oxDNAException("G29_SORT_AUDIT_WRITE_FAILED");
+		ev << "GATE29_SORT_EVENT\t" << (long long)current_step() << '\t'
+		   << g29_N << '\t' << moved << "\tVALID\n";
+		if(!ev.good()) throw oxDNAException("G29_SORT_AUDIT_WRITE_FAILED");
+	}
 }
 
 void MD_CUDABackend::_thermalize() {
@@ -572,8 +733,16 @@ void MD_CUDABackend::sim_step() {
 	_timer_first_step->pause();
 
 	_timer_sorting->resume();
-	if(_d_are_lists_old[0] && _sort_every > 0 && (_N_updates % _sort_every == 0)) {
+	const char *g29_env = std::getenv("OXDNA_GATE29_SORT_AUDIT");
+	const bool g29_force = _sort_every > 0 && !_gate29_forced_sort_done &&
+	   g29_env && std::strcmp(g29_env,"GATE29_RESEARCH_ONLY") == 0;
+	if(g29_force || (_d_are_lists_old[0] && _sort_every > 0 && (_N_updates % _sort_every == 0))) {
 		_sort_particles();
+		if(g29_force) {
+			// Permutation invalidates slot-addressed neighbor lists; rebuild them.
+			_d_are_lists_old[0] = true;
+			_gate29_forced_sort_done = true;
+		}
 	}
 	_timer_sorting->pause();
 
@@ -627,8 +796,8 @@ void MD_CUDABackend::get_settings(input_file &inp) {
 			throw oxDNAException("use_edge and double precision are not compatible");
 		}
 		if(_use_edge && _use_barostat) {
-			throw oxDNAException("use_edge and use_barostat are not compatible");
-		}
+		    throw oxDNAException("use_edge and use_barostat are not compatible");
+		} /* RC1_NPT_HARD_BLOCK */
 	}
 
 	getInputBool(&inp, "CUDA_avoid_cpu_calculations", &_avoid_cpu_calculations, 0);
@@ -728,6 +897,14 @@ void MD_CUDABackend::init() {
 	// copy all the particle related stuff and the constants to device memory
 	apply_changes_to_simulation_data();
 	_init_CUDA_MD_symbols();
+    if(_external_forces && _sort_every>0) {
+        CUDA_SAFE_CALL(GpuUtils::LR_cudaMalloc<int>(&_g50r_p2s, sizeof(int)*N()));
+        CUDA_SAFE_CALL(GpuUtils::LR_cudaMalloc<int>(&_g50r_s2p, sizeof(int)*N()));
+        CUDA_SAFE_CALL(GpuUtils::LR_cudaMalloc<int>(&_g50r_buff_s2p, sizeof(int)*N()));
+        g50r_init_external_maps<<<_particles_kernel_cfg.blocks, _particles_kernel_cfg.threads_per_block>>>
+            (_g50r_p2s, _g50r_s2p);
+        CUT_CHECK_ERROR("G50R initial maps");
+    }
 
 	_cuda_thermostat->set_seed(lrand48());
 	_cuda_thermostat->init();

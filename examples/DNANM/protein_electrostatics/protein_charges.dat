@@ -1,0 +1,11 @@
+# DNANM_ES_CHARGES 1
+# index_space = protein_local
+# index_base = 0
+# charge_model = illustrative-explicit
+# charge_source = user-supplied-example
+# n_protein_beads = 3
+# n_groups = 3
+# columns = protein_index topology_strand residue charge_e group_id
+0 -1 K 1.0 0
+1 -2 K 0.0 1
+2 -3 K 1.0 2

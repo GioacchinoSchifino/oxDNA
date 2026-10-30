@@ -1,3 +1,5 @@
+"""Legacy setuptools entry point; modern builds use pyproject.toml/scikit-build-core."""
+import os
 from setuptools import setup
 
 setup(

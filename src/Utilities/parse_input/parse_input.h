@@ -5,6 +5,9 @@
 #define _GNU_SOURCE
 #endif
 
+#include <cstddef>
+#include <cstdio>
+#include <string>
 #include <vector>
 #include <map>
 #include <set>
@@ -129,7 +132,14 @@ struct input_file {
 int _readLine(std::vector<std::string>::iterator &it, std::vector<std::string>::iterator &end, std::string &key, std::string &value); 
 
 int getInputString(input_file *inp, const char *skey, std::string &dest, int mandatory);
-int getInputString(input_file *inp, const char *skey, char *dest, int mandatory);
+// RC4: raw pointers require an explicit capacity. Fixed arrays retain the
+// four-argument API through a capacity-deducing wrapper; std::string is unchanged.
+int getInputStringBounded(input_file *inp, const char *skey, char *dest,
+                         std::size_t capacity, int mandatory);
+template<std::size_t N>
+int getInputString(input_file *inp, const char *skey, char (&dest)[N], int mandatory) {
+    return getInputStringBounded(inp, skey, dest, N, mandatory);
+}
 int getInputInt(input_file *inp, const char *skey, int *dest, int mandatory);
 int getInputBoolAsInt(input_file *inp, const char *skey, int *dest, int mandatory);
 int getInputBool(input_file *inp, const char *skey, bool *dest, int mandatory);

@@ -11,6 +11,7 @@
 
 __constant__ float bverlet_box_side[1];
 __constant__ int bverlet_N[1];
+__constant__ int bverlet_max_neigh[1];
 __constant__ bool bverlet_AO_mixture[1];
 
 __constant__ float bverlet_sqr_rverlet[3];
@@ -60,7 +61,7 @@ __device__ int get_neigh_cell(const int index, const int3 &offset, const int cel
 	return (z * bverlet_N_cells_side[cell_type] + y) * bverlet_N_cells_side[cell_type] + x;
 }
 
-__device__ void update_cell_neigh_list(c_number4 *poss, const int cell_ind, int *cells, int *counters_cells, c_number4 &r, int *matrix_neighs, int &N_neigh, int p_type, int cell_type) {
+__device__ void update_cell_neigh_list(c_number4 *poss, const int cell_ind, int *cells, int *counters_cells, c_number4 &r, int *matrix_neighs, int &N_neigh, int p_type, int cell_type, int *neighbour_overflow) {
 	for(int i = 0; i < counters_cells[bverlet_counters_offset[cell_type] + cell_ind]; i++) {
 		const int m = cells[bverlet_cells_offset[cell_type] + cell_ind * bverlet_max_N_per_cell[cell_type] + i];
 		if(IND == m) continue;
@@ -71,13 +72,17 @@ __device__ void update_cell_neigh_list(c_number4 *poss, const int cell_ind, int 
 		bool good = (cell_type != 1) || (p_type != m_type);
 
 		if(good && quad_minimum_image_dist(r, rm) < bverlet_sqr_rverlet[p_type + m_type]) {
+			if(N_neigh >= bverlet_max_neigh[0]) {
+				atomicExch(neighbour_overflow, 1);
+				continue;
+			}
 			matrix_neighs[N_neigh * bverlet_N[0] + IND] = m;
 			N_neigh++;
 		}
 	}
 }
 
-__global__ void bin_update_self_neigh_list(c_number4 *poss, c_number4 *list_poss, int *cells, int *counters_cells, int *matrix_neighs, int *c_number_neighs) {
+__global__ void bin_update_self_neigh_list(c_number4 *poss, c_number4 *list_poss, int *cells, int *counters_cells, int *matrix_neighs, int *c_number_neighs, int *neighbour_overflow) {
 	if(IND >= bverlet_N[0]) return;
 
 	c_number4 r = poss[IND];
@@ -88,41 +93,41 @@ __global__ void bin_update_self_neigh_list(c_number4 *poss, c_number4 *list_poss
 
 	if(p_type == P_A || !bverlet_AO_mixture[0]) {
 		// visit this cell
-		update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(0, 0, 0), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type);
+		update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(0, 0, 0), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type, neighbour_overflow);
 		// visit 26 neighbour cells grouped into 13 pairs of mutually opposite cells
-		update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(-1, -1, -1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type);
-		update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(+1, +1, +1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type);
-		update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(-1, -1, +1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type);
-		update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(+1, +1, -1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type);
-		update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(-1, +1, +1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type);
-		update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(+1, -1, -1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type);
-		update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(+1, -1, +1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type);
-		update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(-1, +1, -1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type);
-		update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(-1, -1, 0), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type);
-		update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(+1, +1, 0), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type);
-		update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(-1, +1, 0), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type);
-		update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(+1, -1, 0), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type);
-		update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(-1, 0, -1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type);
-		update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(+1, 0, +1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type);
-		update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(-1, 0, +1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type);
-		update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(+1, 0, -1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type);
-		update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(0, -1, -1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type);
-		update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(0, +1, +1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type);
-		update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(0, -1, +1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type);
-		update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(0, +1, -1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type);
-		update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(-1, 0, 0), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type);
-		update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(+1, 0, 0), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type);
-		update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(0, -1, 0), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type);
-		update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(0, +1, 0), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type);
-		update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(0, 0, -1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type);
-		update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(0, 0, +1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type);
+		update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(-1, -1, -1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type, neighbour_overflow);
+		update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(+1, +1, +1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type, neighbour_overflow);
+		update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(-1, -1, +1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type, neighbour_overflow);
+		update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(+1, +1, -1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type, neighbour_overflow);
+		update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(-1, +1, +1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type, neighbour_overflow);
+		update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(+1, -1, -1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type, neighbour_overflow);
+		update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(+1, -1, +1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type, neighbour_overflow);
+		update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(-1, +1, -1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type, neighbour_overflow);
+		update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(-1, -1, 0), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type, neighbour_overflow);
+		update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(+1, +1, 0), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type, neighbour_overflow);
+		update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(-1, +1, 0), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type, neighbour_overflow);
+		update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(+1, -1, 0), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type, neighbour_overflow);
+		update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(-1, 0, -1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type, neighbour_overflow);
+		update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(+1, 0, +1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type, neighbour_overflow);
+		update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(-1, 0, +1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type, neighbour_overflow);
+		update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(+1, 0, -1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type, neighbour_overflow);
+		update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(0, -1, -1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type, neighbour_overflow);
+		update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(0, +1, +1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type, neighbour_overflow);
+		update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(0, -1, +1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type, neighbour_overflow);
+		update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(0, +1, -1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type, neighbour_overflow);
+		update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(-1, 0, 0), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type, neighbour_overflow);
+		update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(+1, 0, 0), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type, neighbour_overflow);
+		update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(0, -1, 0), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type, neighbour_overflow);
+		update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(0, +1, 0), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type, neighbour_overflow);
+		update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(0, 0, -1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type, neighbour_overflow);
+		update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(0, 0, +1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type, neighbour_overflow);
 	}
 
 	list_poss[IND] = r;
 	c_number_neighs[IND] = N_neighs;
 }
 
-__global__ void bin_update_mixed_neigh_list(c_number4 *poss, int *cells, int *counters_cells, int *matrix_neighs, int *c_number_neighs) {
+__global__ void bin_update_mixed_neigh_list(c_number4 *poss, int *cells, int *counters_cells, int *matrix_neighs, int *c_number_neighs, int *neighbour_overflow) {
 	if(IND >= bverlet_N[0]) return;
 
 	c_number4 r = poss[IND];
@@ -132,33 +137,33 @@ __global__ void bin_update_mixed_neigh_list(c_number4 *poss, int *cells, int *co
 	int index = compute_cell_index(r, cell_type);
 
 	// mixed interactions
-	update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(0, 0, 0), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type);
-	update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(-1, -1, -1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type);
-	update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(+1, +1, +1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type);
-	update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(-1, -1, +1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type);
-	update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(+1, +1, -1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type);
-	update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(-1, +1, +1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type);
-	update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(+1, -1, -1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type);
-	update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(+1, -1, +1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type);
-	update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(-1, +1, -1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type);
-	update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(-1, -1, 0), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type);
-	update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(+1, +1, 0), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type);
-	update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(-1, +1, 0), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type);
-	update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(+1, -1, 0), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type);
-	update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(-1, 0, -1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type);
-	update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(+1, 0, +1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type);
-	update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(-1, 0, +1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type);
-	update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(+1, 0, -1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type);
-	update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(0, -1, -1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type);
-	update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(0, +1, +1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type);
-	update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(0, -1, +1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type);
-	update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(0, +1, -1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type);
-	update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(-1, 0, 0), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type);
-	update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(+1, 0, 0), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type);
-	update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(0, -1, 0), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type);
-	update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(0, +1, 0), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type);
-	update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(0, 0, -1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type);
-	update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(0, 0, +1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type);
+	update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(0, 0, 0), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type, neighbour_overflow);
+	update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(-1, -1, -1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type, neighbour_overflow);
+	update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(+1, +1, +1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type, neighbour_overflow);
+	update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(-1, -1, +1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type, neighbour_overflow);
+	update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(+1, +1, -1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type, neighbour_overflow);
+	update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(-1, +1, +1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type, neighbour_overflow);
+	update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(+1, -1, -1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type, neighbour_overflow);
+	update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(+1, -1, +1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type, neighbour_overflow);
+	update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(-1, +1, -1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type, neighbour_overflow);
+	update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(-1, -1, 0), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type, neighbour_overflow);
+	update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(+1, +1, 0), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type, neighbour_overflow);
+	update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(-1, +1, 0), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type, neighbour_overflow);
+	update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(+1, -1, 0), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type, neighbour_overflow);
+	update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(-1, 0, -1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type, neighbour_overflow);
+	update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(+1, 0, +1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type, neighbour_overflow);
+	update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(-1, 0, +1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type, neighbour_overflow);
+	update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(+1, 0, -1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type, neighbour_overflow);
+	update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(0, -1, -1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type, neighbour_overflow);
+	update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(0, +1, +1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type, neighbour_overflow);
+	update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(0, -1, +1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type, neighbour_overflow);
+	update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(0, +1, -1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type, neighbour_overflow);
+	update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(-1, 0, 0), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type, neighbour_overflow);
+	update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(+1, 0, 0), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type, neighbour_overflow);
+	update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(0, -1, 0), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type, neighbour_overflow);
+	update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(0, +1, 0), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type, neighbour_overflow);
+	update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(0, 0, -1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type, neighbour_overflow);
+	update_cell_neigh_list(poss, get_neigh_cell(index, make_int3(0, 0, +1), cell_type), cells, counters_cells, r, matrix_neighs, N_neighs, p_type, cell_type, neighbour_overflow);
 
 	c_number_neighs[IND] = N_neighs;
 }
@@ -172,11 +177,22 @@ __global__ void bin_fill_cells(c_number4 *poss, int *cells, int *counters_cells,
 	int index = compute_cell_index(r, cell_type);
 	// the index that results from this operation is just offset + index
 	// self cells
-	cells[bverlet_cells_offset[cell_type] + index * bverlet_max_N_per_cell[cell_type] + atomicInc((uint32_t *) &counters_cells[bverlet_counters_offset[cell_type] + index], bverlet_max_N_per_cell[cell_type])] = IND;
+	const int self_counter = bverlet_counters_offset[cell_type] + index;
+	const int self_slot = atomicAdd(&counters_cells[self_counter], 1);
+	if(self_slot >= 0 && self_slot < bverlet_max_N_per_cell[cell_type]) {
+		cells[bverlet_cells_offset[cell_type] + index * bverlet_max_N_per_cell[cell_type] + self_slot] = IND;
+	} else {
+		*cell_overflow = true;
+	}
 
 	// mixed cells
 	cell_type = 1;
 	index = compute_cell_index(r, cell_type);
-	cells[bverlet_cells_offset[cell_type] + index * bverlet_max_N_per_cell[cell_type] + atomicInc((uint32_t *) &counters_cells[bverlet_counters_offset[cell_type] + index], bverlet_max_N_per_cell[cell_type])] = IND;
-	if(counters_cells[bverlet_counters_offset[cell_type] + index] >= bverlet_max_N_per_cell[cell_type]) *cell_overflow = true;
+	const int mixed_counter = bverlet_counters_offset[cell_type] + index;
+	const int mixed_slot = atomicAdd(&counters_cells[mixed_counter], 1);
+	if(mixed_slot >= 0 && mixed_slot < bverlet_max_N_per_cell[cell_type]) {
+		cells[bverlet_cells_offset[cell_type] + index * bverlet_max_N_per_cell[cell_type] + mixed_slot] = IND;
+	} else {
+		*cell_overflow = true;
+	}
 }

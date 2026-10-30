@@ -19,7 +19,7 @@
     }                                                         \
   } while (0)
 /// CUT_CHECK_ERROR replacement for backwards compatibility (CUDA < 5.0)
-#define CUT_CHECK_ERROR(x) getLastCudaError(x);
+#define CUT_CHECK_ERROR(message) oxdna_cuda_check_last_error((message), __FILE__, __LINE__)
 
 /// threads per block
 #define TINBLOCK (blockDim.x*blockDim.y)
@@ -51,6 +51,7 @@
 
 #include <cuda.h>
 #include <cuda_runtime_api.h>
+#include "OxDNACudaErrorCheck.h"
 
 /**
  * @brief Utility struct used by CUDA class to store information about kernel configurations.

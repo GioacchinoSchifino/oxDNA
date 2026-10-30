@@ -33,6 +33,7 @@ protected:
 	int *_d_counters_cells = nullptr;
 	int *_d_number_neighs_no_doubles = nullptr;
 	bool *_d_cell_overflow = nullptr;
+	int *_d_neighbour_overflow = nullptr; // separate device-side fail-closed flag
 
 	cudaTextureObject_t _counters_cells_tex = 0;
 

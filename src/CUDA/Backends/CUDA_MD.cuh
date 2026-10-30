@@ -10,15 +10,17 @@ __constant__ float MD_dt[1];
 // Conversion of the R matrix in _get_updated_orientation above into a quaternion simplifies into the qR quaternion used in _get_updated_orientation. This is then multiplied by the original orientation quaternion to produce the updated quaternion. Quaternion multiplication is the cross_product - dot_product and is therefore non-commutative
 __device__ GPU_quat _get_updated_orientation(c_number4 &L, GPU_quat &old_o) {
 	c_number norm = _module(L);
+	// Zero angular momentum means the identity rotation.
+	if(norm == (c_number) 0.) return old_o;
 	L.x /= norm;
 	L.y /= norm;
 	L.z /= norm;
 
-	c_number sintheta, costheta;
-	sincos(MD_dt[0] * norm, &sintheta, &costheta);
-	c_number qw = (c_number) 0.5f * sqrtf(fmaxf((c_number) 0.f, (c_number) 2.f + 2.f*costheta));
-	c_number winv = (c_number)1.f /qw;
-	GPU_quat R = {(c_number) 0.5f*L.x*sintheta*winv, (c_number) 0.5f*L.y*sintheta*winv, (c_number) 0.5f*L.z*sintheta*winv, qw};
+	// Avoid division by cos(theta/2), which vanishes at theta = pi.
+	// The existing multiplication order and zero-L identity are unchanged.
+	c_number sin_half, cos_half;
+	sincos((c_number) 0.5f * MD_dt[0] * norm, &sin_half, &cos_half);
+	GPU_quat R = {L.x*sin_half, L.y*sin_half, L.z*sin_half, cos_half};
 
 	return quat_multiply(old_o, R);
 }
@@ -94,7 +96,21 @@ __global__ void rescale_positions(c_number4 *poss, c_number4 ratio) {
 	poss[IND] = ppos;
 }
 
-__global__ void set_external_forces(c_number4 *poss, GPU_quat *orientations, CUDA_trap *ext_forces, c_number4 *forces, c_number4 *torques, llint step, int max_ext_forces, CUDABox *box) {
+// G50R physical-to-slot maps. The inverse sort permutation composes with
+// the previous map; no float bit packing or physics parameters are changed.
+__global__ void g50r_init_external_maps(int *p2s, int *s2p) {
+    if(IND >= MD_N[0]) return;
+    p2s[IND] = IND;
+    s2p[IND] = IND;
+}
+__global__ void g50r_compose_external_maps(const int *sorted_order,
+    const int *old_s2p, int *next_s2p, int *p2s) {
+    if(IND >= MD_N[0]) return;
+    const int physical = old_s2p[sorted_order[IND]];
+    next_s2p[IND] = physical;
+    p2s[physical] = IND;
+}
+__global__ void set_external_forces(c_number4 *poss, GPU_quat *orientations, CUDA_trap *ext_forces, c_number4 *forces, c_number4 *torques, llint step, int max_ext_forces, CUDABox *box, const int *g50r_p2s, const int *g50r_s2p) {
 	if(IND >= MD_N[0]) return;
 	// if there are no external forces then just put the force to 0
 	if(max_ext_forces == 0) {
@@ -109,7 +125,8 @@ __global__ void set_external_forces(c_number4 *poss, GPU_quat *orientations, CUD
 
 	for(int i = 0; i < max_ext_forces; i++) {
 		// coalesced
-		CUDA_trap extF = ext_forces[MD_N[0] * i + IND];
+		const int physical_owner = (g50r_s2p != nullptr) ? g50r_s2p[IND] : IND;
+		CUDA_trap extF = ext_forces[MD_N[0] * i + physical_owner];
 		switch (extF.type) {
 			case CUDA_TRAP_CONSTANT: {
 				c_number intensity = extF.constant.F0 + step*extF.constant.rate;
@@ -129,7 +146,8 @@ __global__ void set_external_forces(c_number4 *poss, GPU_quat *orientations, CUD
 				break;
 			}
 			case CUDA_TRAP_MUTUAL: {
-				c_number4 qpos = poss[extF.mutual.p_ind];
+				const int ref_slot = (g50r_p2s != nullptr) ? g50r_p2s[extF.mutual.p_ind] : extF.mutual.p_ind;
+				c_number4 qpos = poss[ref_slot];
 
 				c_number4 dr = (extF.mutual.PBC) ? box->minimum_image(ppos, qpos) : qpos - ppos;
 				c_number dr_abs = _module(dr);

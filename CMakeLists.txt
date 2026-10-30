@@ -114,6 +114,11 @@ IF(MPI)
 	ADD_DEFINITIONS(-DHAVE_MPI)
 ENDIF(MPI)
 
+# Capture the caller's architecture before enable_language supplies a default.
+set(OXDNA_CALLER_CUDA_ARCH "")
+if(DEFINED CMAKE_CUDA_ARCHITECTURES AND NOT "${CMAKE_CUDA_ARCHITECTURES}" STREQUAL "")
+    set(OXDNA_CALLER_CUDA_ARCH "${CMAKE_CUDA_ARCHITECTURES}")
+endif()
 if(CUDA)
 	find_package(CUDAToolkit REQUIRED)
 	if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL "13.0")
@@ -152,7 +157,10 @@ if(CUDA)
 
 		enable_language(CUDA)
 
-		if(CUDA_COMMON_ARCH)
+		if(NOT "${OXDNA_CALLER_CUDA_ARCH}" STREQUAL "")
+			set(CMAKE_CUDA_ARCHITECTURES "${OXDNA_CALLER_CUDA_ARCH}")
+			message(STATUS "Using caller CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
+		elseif(CUDA_COMMON_ARCH)
 			# Query NVCC for supported architectures
 			execute_process(
 				COMMAND ${CMAKE_CUDA_COMPILER} --list-gpu-arch
@@ -309,6 +317,15 @@ ELSE()
 		SET(tag "v${OXPY_FALLBACK_VERSION}")
 	endif()
 ENDIF(IS_GIT_REPO)
+
+# Derivative identity is independent of upstream oxpy's fallback version.
+set(OXDNA_ANM_RELEASE_LABEL "oxDNA-ANM-1.1.0-rc4-dev" CACHE STRING "Explicit derivative build label")
+if(NOT "${OXDNA_ANM_RELEASE_LABEL}" STREQUAL "")
+    if(NOT OXDNA_ANM_RELEASE_LABEL MATCHES "^[A-Za-z0-9][A-Za-z0-9._+-]*$")
+        message(FATAL_ERROR "Invalid OXDNA_ANM_RELEASE_LABEL")
+    endif()
+    set(tag "${OXDNA_ANM_RELEASE_LABEL}")
+endif()
 
 # return the current date as day/month/year
 MACRO(CURRENT_DATE result)

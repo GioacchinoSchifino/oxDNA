@@ -1,0 +1,58 @@
+name: Unified ANM DNACT CPU Qualification
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches: [main, release/v1.1.0-rc, staging/v1.1.0-20261029]
+permissions:
+  contents: read
+jobs:
+  cpu:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 35
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      BUILD_DIR: /tmp/oxdna-v110-build
+      RESULTS_DIR: /tmp/oxdna-v110-results
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # pinned v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # pinned v5
+        with:
+          python-version: '3.11'
+      - name: Test portable upstream pre-commit checks using real Git commits
+        run: python3 -B ci/test_upstream_precommit_compat.py
+      - name: Check real checkout against staged-release pre-commit policy
+        run: python3 -B ci/upstream_precommit_compat.py
+      - name: Record source and configure outside the checkout
+        run: |
+          mkdir -p "$RESULTS_DIR"
+          python -B ci/source_tree_manifest.py . > "$RESULTS_DIR/source.before.json"
+          git rev-parse HEAD > "$RESULTS_DIR/commit.txt"
+          cmake -S . -B "$BUILD_DIR" -DCUDA=OFF -DDOUBLE=ON -DPython=OFF -DMPI=OFF -DZSTD_ENABLED=OFF -DNATIVE_COMPILATION=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DOXDNA_ANM_RELEASE_LABEL=oxDNA-ANM-1.1.0-rc-private
+          cmake --build "$BUILD_DIR" --target oxDNA --parallel 2
+      - name: CPU programs with nonempty suites and no skips
+        run: python -B ci/run_cpu_regressions.py --source . --binary "$BUILD_DIR/bin/oxDNA" --output "$RESULTS_DIR/cpu"
+      - name: Independent physics and invalid-input checks
+        run: python -B ci/run_unified_physics.py --binary "$BUILD_DIR/bin/oxDNA" --backend CPU --output "$RESULTS_DIR/physics"
+      # Archival probes require a separately preserved historical audit.zip.
+      # They are not self-contained; never report them as this source-only CI PASS.
+      # CPU regressions, independent physics and parser/index tests remain mandatory.
+      - name: Particle index acceptance and rejection
+        run: python -B test/FORCES/PARTICLE_INDEX/run_index_regression.py "$BUILD_DIR/bin/oxDNA" > "$RESULTS_DIR/particle_index.log" 2>&1
+      - name: Check source identity after all checks
+        run: |
+          python -B ci/source_tree_manifest.py . > "$RESULTS_DIR/source.after.json"
+          cmp "$RESULTS_DIR/source.before.json" "$RESULTS_DIR/source.after.json"
+      - name: Preserve raw results and build configuration
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # pinned v4
+        with:
+          name: oxdna-v110-cpu-${{ github.sha }}
+          path: |
+            /tmp/oxdna-v110-results/
+            /tmp/oxdna-v110-build/CMakeCache.txt
+            /tmp/oxdna-v110-build/compile_commands.json
+          if-no-files-found: error
+# Private CPU qualification only; no publication, deployment, or GPU jobs.

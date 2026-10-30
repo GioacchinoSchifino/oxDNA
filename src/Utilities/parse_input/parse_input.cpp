@@ -11,6 +11,7 @@
 
 #include <tinyexpr/tinyexpr.h>
 
+#include <cstring>
 #include <regex>
 #include <algorithm>
 
@@ -374,15 +375,22 @@ int getInputString(input_file *inp, const char *skey, std::string &dest, int man
 	return KEY_FOUND;
 }
 
-int getInputString(input_file *inp, const char *skey, char *dest, int mandatory) {
-	string s_dest;
-	int res = getInputString(inp, skey, s_dest, mandatory);
-	if(res != KEY_FOUND) {
-		return KEY_NOT_FOUND;
-	}
-	strncpy(dest, s_dest.c_str(), sizeof(char) * (s_dest.size() + 1));
-
-	return KEY_FOUND;
+int getInputStringBounded(input_file *inp, const char *skey, char *dest,
+                         std::size_t capacity, int mandatory) {
+    if(dest == nullptr || capacity == 0) {
+        throw oxDNAException("Input key '%s' requires a nonempty destination buffer", skey);
+    }
+    std::string value;
+    const int result = getInputString(inp, skey, value, mandatory);
+    if(result != KEY_FOUND) {
+        // Missing optional values preserve the caller's initialized default.
+        return KEY_NOT_FOUND;
+    }
+    if(value.find('\0') != std::string::npos || value.size() >= capacity) {
+        throw oxDNAException("Input key '%s' exceeds its destination capacity (%zu bytes including terminator) or contains NUL", skey, capacity);
+    }
+    std::memcpy(dest, value.c_str(), value.size() + 1);
+    return KEY_FOUND;
 }
 
 int getInputInt(input_file *inp, const char *skey, int *dest, int mandatory) {

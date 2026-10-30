@@ -7,15 +7,18 @@ __constant__ int MD_N[1];
 // this function modifies L
 __device__ GPU_quat_double _get_updated_orientation(LR_double4 &L, GPU_quat_double &old_o) {
 	double norm = sqrt(CUDA_DOT(L, L));
+	// A half-kick can make L exactly zero despite a nonzero initial L.
+	if(norm == 0.) return old_o;
 	L.x /= norm;
 	L.y /= norm;
 	L.z /= norm;
 	
-	double sintheta, costheta;
-	sincos(MD_dt[0] * norm, &sintheta, &costheta);
-	double qw = 0.5*sqrt(max(0., 2. + 2.*costheta));
-	double winv = (double)1.0 /qw;
-	GPU_quat_double R = {0.5*L.x*sintheta*winv, 0.5*L.y*sintheta*winv, 0.5*L.z*sintheta*winv, qw};
+	// Direct half-angle form stays finite when the full rotation is pi.
+	// Quaternion sign may differ from the former positive-w convention;
+	// q and -q represent the same orientation.
+	double sin_half, cos_half;
+	sincos(0.5 * MD_dt[0] * norm, &sin_half, &cos_half);
+	GPU_quat_double R = {L.x*sin_half, L.y*sin_half, L.z*sin_half, cos_half};
 	
 	return quat_multiply(old_o, R);
 }

@@ -6,6 +6,32 @@
  */
 
 #include "PairEnergy.h"
+
+#include "../Interactions/DNANMInteraction.h"
+#include <string>
+
+namespace {
+std::string dnanm_pair_energy_term_label(int id) {
+    switch(id) {
+        case 0: return "FENE";
+        case 1: return "BEXC";
+        case 2: return "STCK";
+        case 3: return "NEXC";
+        case 4: return "HB";
+        case 5: return "CRSTCK";
+        case 6: return "CXSTCK";
+        case 7: return "DH";
+        case 8: return "SPRING";
+        case 9: return "PRO_EXC_VOL";
+        case 10: return "PRO_DNA_EXC_VOL";
+        case 11: return "PRO_ANG_POT";
+        case 12: return "PRO_DNA_DH";
+        case 13: return "PRO_PRO_DH";
+        default: return "TERM_" + std::to_string(id);
+    }
+}
+}
+
 //#include "../Interactions/RNAInteraction_V1.h"
 #include <sstream>
 #include <map>
@@ -40,12 +66,31 @@ std::string PairEnergy::get_output_string(llint curr_step) {
 	number total_energy_diff = 0.;
 	std::map<int, number> split_energies = _config_info->interaction->get_system_energy_split(_config_info->particles(), _config_info->lists);
 
-	if(_print_header) {
-		if((int) split_energies.size() == 7) output_str << "#id1 id2 FENE BEXC STCK NEXC HB CRSTCK CXSTCK total, t = " << curr_step << "\n";
-		else output_str << "#id1 id2 FENE BEXC STCK NEXC HB CRSTCK CXSTCK DH total, t = " << curr_step << "\n";
-	}
+	if(_print_header &&
+       dynamic_cast<DNANMInteraction *>(
+           _config_info->interaction
+       ) != nullptr) {
+        output_str << "#id1 id2";
+        for(const auto &entry : split_energies) {
+            output_str << " "
+                       << dnanm_pair_energy_term_label(entry.first);
+        }
+        output_str << " total, t = " << curr_step << "\n";
+    }
+    else if(_print_header) {
+        if(split_energies.size() > 8) {
+            output_str << "#id1 id2";
+            for(const auto &entry : split_energies)
+                output_str << " term_" << entry.first;
+            output_str << " total, t = " << curr_step << "\n";
+        }
+        else if((int) split_energies.size() == 7)
+            output_str << "#id1 id2 FENE BEXC STCK NEXC HB CRSTCK CXSTCK total, t = " << curr_step << "\n";
+        else
+            output_str << "#id1 id2 FENE BEXC STCK NEXC HB CRSTCK CXSTCK DH total, t = " << curr_step << "\n";
+    }
 
-	for(typename std::map<int, number>::iterator l = split_energies.begin(); l != split_energies.end(); l++)
+    for(typename std::map<int, number>::iterator l = split_energies.begin(); l != split_energies.end(); l++)
 		total_energy_diff += (*l).second;
 
 	if(_print_all_particles) {
@@ -73,13 +118,13 @@ std::string PairEnergy::get_output_string(llint curr_step) {
 			pair_string << " " << pair_interaction << '\n';
 			if(interaction_exists) output_str << pair_string.str();
 		}
-		output_str << "#Total energy per particle is  " << total_energy / _config_info->N() << " and should be " << total_energy_diff / _config_info->N() << '\n' * _print_header;
+		output_str << "#Total energy per particle is  " << total_energy / _config_info->N() << " and should be " << total_energy_diff / _config_info->N() << '\n' ;
 	}
 	else {
-		if(_particle1_id > _config_info->N()) {
+		if(_particle1_id < 0 || _particle1_id >= _config_info->N()) {
 			throw oxDNAException("PairEnergy: particle1_id (%d) is invalid", _particle1_id);
 		}
-		if(_particle2_id > _config_info->N()) {
+		if(_particle2_id < 0 || _particle2_id >= _config_info->N()) {
 			throw oxDNAException("PairEnergy: particle2_id (%d) is invalid", _particle2_id);
 		}
 
@@ -90,13 +135,14 @@ std::string PairEnergy::get_output_string(llint curr_step) {
 		std::stringstream pair_string;
 		pair_string << p->index << " " << q->index;
 
-		for(int k = 0; k < (int) split_energies.size(); k++) {
+		for(const auto &entry : split_energies) {
+			int k = entry.first;
 			number k_th_interaction = _config_info->interaction->pair_interaction_term(k, q, p);
 			pair_interaction += k_th_interaction;
 			total_energy += k_th_interaction;
 			pair_string << " " << k_th_interaction;
 		}
-		pair_string << " " << pair_interaction << '\n' * _print_header;
+		pair_string << " " << pair_interaction << '\n' ;
 		// always print even if the interaction energy is zero
 		output_str << pair_string.str();
 

@@ -32,6 +32,17 @@ public:
     float _minus_kappa;
 
     int *_d_is_strand_end = nullptr;
+    // V9: physical particle identity -> current (possibly sorted) CUDA slot.
+    int *_d_anm_v9_physical_to_slot = nullptr;
+    int *_d_anm_v9_map_errors = nullptr;
+    bool _anm_v9_list_cutoff_recorded = false;
+    c_number _anm_v9_initial_list_cutoff = (c_number) 0;
+
+
+    c_number *_d_protein_charge = nullptr;
+    int *_d_protein_group = nullptr;
+    c_number _cuda_protein_protein_dh_scale = (c_number) 1.0;
+    c_number _cuda_protein_dna_dh_scale = (c_number) 1.0;
 
     float _pro_backbone_sigma, _pro_backbone_rstar, _pro_backbone_b, _pro_backbone_rcut, _pro_backbone_sqr_rcut;
     float _pro_base_sigma, _pro_base_rstar, _pro_base_b, _pro_base_rcut, _pro_base_sqr_rcut;

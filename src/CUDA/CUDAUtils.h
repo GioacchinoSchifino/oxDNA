@@ -10,7 +10,6 @@
 #include "../defs.h"
 #include "cuda_defs.h"
 
-#include "cuda_utils/helper_cuda.h"
 
 /**
 * @brief Static class. It stores many utility functions used by CUDA classes. It could probably be turned into a namespace...

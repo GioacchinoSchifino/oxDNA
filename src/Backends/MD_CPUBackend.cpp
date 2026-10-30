@@ -108,27 +108,30 @@ void MD_CPUBackend::_first_step() {
 			p->L += p->torque * (_dt * (number) 0.5);
 			// update of the orientation
 			number norm = p->L.module();
-			LR_vector LVersor(p->L / norm);
+			// A zero half-step L has an identity orientation update.
+			if(norm != (number) 0.) {
+				LR_vector LVersor(p->L / norm);
 
-			number sintheta = sin(_dt * norm);
-			number costheta = cos(_dt * norm);
-			number olcos = 1. - costheta;
+				number sintheta = sin(_dt * norm);
+				number costheta = cos(_dt * norm);
+				number olcos = 1. - costheta;
 
-			number xyo = LVersor[0] * LVersor[1] * olcos;
-			number xzo = LVersor[0] * LVersor[2] * olcos;
-			number yzo = LVersor[1] * LVersor[2] * olcos;
-			number xsin = LVersor[0] * sintheta;
-			number ysin = LVersor[1] * sintheta;
-			number zsin = LVersor[2] * sintheta;
+				number xyo = LVersor[0] * LVersor[1] * olcos;
+				number xzo = LVersor[0] * LVersor[2] * olcos;
+				number yzo = LVersor[1] * LVersor[2] * olcos;
+				number xsin = LVersor[0] * sintheta;
+				number ysin = LVersor[1] * sintheta;
+				number zsin = LVersor[2] * sintheta;
 
-			LR_matrix R(
-				LVersor[0] * LVersor[0] * olcos + costheta, xyo - zsin, xzo + ysin, 
-				xyo + zsin, LVersor[1] * LVersor[1] * olcos + costheta, yzo - xsin, 
-				xzo - ysin, yzo + xsin, LVersor[2] * LVersor[2] * olcos + costheta);
+				LR_matrix R(
+					LVersor[0] * LVersor[0] * olcos + costheta, xyo - zsin, xzo + ysin,
+					xyo + zsin, LVersor[1] * LVersor[1] * olcos + costheta, yzo - xsin,
+					xzo - ysin, yzo + xsin, LVersor[2] * LVersor[2] * olcos + costheta);
 
-			p->orientation = p->orientation * R;
-			p->orientationT = p->orientation.get_transpose();
-			p->set_positions();
+				p->orientation = p->orientation * R;
+				p->orientationT = p->orientation.get_transpose();
+				p->set_positions();
+			}
 		}
 
 		_lists->single_update(p);

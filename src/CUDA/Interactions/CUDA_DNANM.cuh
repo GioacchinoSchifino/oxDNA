@@ -1,6 +1,7 @@
 /* System constants */
 __constant__ int MD_N[1];
 __constant__ int MD_n_forces[1];
+// RC1: all physical nonbonded energy contributions always accounted
 
 __constant__ float MD_hb_multi[1];
 __constant__ float MD_F1_A[2];
@@ -1085,6 +1086,10 @@ __constant__ float MD_pro_backbone_rstar;
 __constant__ float MD_pro_backbone_b;
 __constant__ float MD_pro_backbone_rc;
 __constant__ float MD_pro_backbone_sqr_rcut;
+// Match the DNANM CPU model: protein-DNA repulsion has independent stiffness
+// (1.0 in the audited baseline), unlike DNA/PP excluded-volume EXCL_EPS=2.
+__constant__ float MD_pro_backbone_stiffness;
+__constant__ float MD_pro_base_stiffness;
 
 __constant__ float MD_pro_base_sigma;
 __constant__ float MD_pro_base_rstar;
@@ -1379,9 +1384,161 @@ __forceinline__ __device__ void excluded_volume_quart_ang(const c_number4 &r, c_
 //    }
 //}
 
+__forceinline__ __device__
+void dnanm_scaled_debye_huckel(
+    const c_number4 &r,
+    c_number charge_product,
+    c_number4 &F
+) {
+    F.x = F.y = F.z = F.w =
+        (c_number) 0.f;
+
+    if(charge_product == (c_number) 0.f) {
+        return;
+    }
+
+    const c_number rsqr =
+        CUDA_DOT(r, r);
+
+    if(rsqr <= (c_number) 0.f) {
+        return;
+    }
+
+    const c_number rmod =
+        sqrtf(rsqr);
+
+    if(rmod >= MD_dh_RC[0]) {
+        return;
+    }
+
+    const c_number4 rdir =
+        r / rmod;
+
+    if(rmod < MD_dh_RHIGH[0]) {
+        const c_number exponential =
+            expf(
+                MD_dh_minus_kappa[0]
+                * rmod
+            );
+
+        F =
+            rdir
+            * (
+                -MD_dh_prefactor[0]
+                * exponential
+                * (
+                    MD_dh_minus_kappa[0]
+                    / rmod
+                    -
+                    (c_number) 1.f
+                    / SQR(rmod)
+                )
+            );
+
+        F.w =
+            exponential
+            * (
+                MD_dh_prefactor[0]
+                / rmod
+            );
+    }
+    else {
+        F =
+            rdir
+            * (
+                -2.f
+                * MD_dh_B[0]
+                * (
+                    rmod
+                    - MD_dh_RC[0]
+                )
+            );
+
+        F.w =
+            MD_dh_B[0]
+            * SQR(
+                rmod
+                - MD_dh_RC[0]
+            );
+    }
+
+    F *= charge_product;
+}
+
+__device__ __forceinline__
+bool dnanm_is_affected_pair(
+    int global_from,
+    int global_to,
+    const int *affected_indx,
+    const int *affected
+) {
+    if(affected_indx == nullptr ||
+       affected == nullptr) {
+        return false;
+    }
+
+    const int local_from =
+        global_from - _offset;
+
+    const int local_to =
+        global_to - _offset;
+
+    if(local_from < 0 ||
+       local_to < 0 ||
+       local_from >= _npro ||
+       local_to >= _npro) {
+        return false;
+    }
+
+    const int lower =
+        affected_indx[local_from];
+
+    const int upper =
+        affected_indx[local_from + 1];
+
+    for(int k = lower; k < upper; ++k) {
+        if(affected[k] == local_to) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+// V9 ANM stable physical-ID map. CUDA slots are not original particle IDs.
+// atomicCAS ensures duplicate physical IDs are detected without a data race.
+__global__ void dnanm_v9_build_slotmap(const c_number4 *poss, int *map,
+                                      int *errors, int N) {
+    if(IND >= N) return;
+    const int physical_id = get_particle_index(poss[IND]);
+    if(physical_id < 0 || physical_id >= N) {
+        atomicAdd(&errors[0], 1);
+        return;
+    }
+    if(atomicCAS(&map[physical_id], -1, IND) != -1)
+        atomicAdd(&errors[0], 1);
+}
+__global__ void dnanm_v9_check_slotmap(const c_number4 *poss, const int *map,
+                                      int *errors, int N) {
+    if(IND >= N) return;
+    const int slot = map[IND];
+    if(slot < 0 || slot >= N) {
+        atomicAdd(&errors[1], 1);
+        return;
+    }
+    if(get_particle_index(poss[slot]) != IND)
+        atomicAdd(&errors[1], 1);
+}
+
 __global__ void dnanm_forces_edge_nonbonded(const c_number4 __restrict__ *poss, const GPU_quat __restrict__ *orientations, c_number4 __restrict__ *forces,
                                             c_number4 __restrict__ *torques, const edge_bond __restrict__ *edge_list, int n_edges, const int *is_strand_end, bool grooving,
-                                            bool use_debye_huckel, bool use_oxDNA2_coaxial_stacking, bool update_st, CUDAStressTensor *st, const CUDABox *box) {
+                                            bool use_debye_huckel, bool use_oxDNA2_coaxial_stacking,
+                                            const c_number *protein_charge, const int *protein_group,
+                                            bool use_protein_dna_dh, bool use_protein_protein_dh,
+                                            bool exclude_intragroup_dh,
+                                            c_number protein_dna_dh_scale, c_number protein_protein_dh_scale,
+                                            const int *affected_indx, const int *affected,
+                                            bool update_st, CUDAStressTensor *st, const CUDABox *box) {
     if (IND >= n_edges) return;
 
     c_number4 dF = make_c_number4(0, 0, 0, 0);
@@ -1391,7 +1548,7 @@ __global__ void dnanm_forces_edge_nonbonded(const c_number4 __restrict__ *poss, 
 
     // get info for particle 1
     c_number4 ppos = poss[b.from];
-    bool p_is_end = (use_debye_huckel) ? is_strand_end[b.from] : false;
+    bool p_is_end = (use_debye_huckel || use_protein_dna_dh) ? is_strand_end[b.from] : false;
     // particle axes according to Allen's paper
     c_number4 a1, a2, a3;
     get_vectors_from_quat(orientations[b.from], a1, a2, a3);
@@ -1399,7 +1556,7 @@ __global__ void dnanm_forces_edge_nonbonded(const c_number4 __restrict__ *poss, 
 
     // get info for particle 2
     c_number4 qpos = poss[b.to];
-    bool q_is_end = (use_debye_huckel) ? is_strand_end[b.to] : false;
+    bool q_is_end = (use_debye_huckel || use_protein_dna_dh) ? is_strand_end[b.to] : false;
     c_number4 b1, b2, b3;
     get_vectors_from_quat(orientations[b.to], b1, b2, b3);
     int qbtype = get_particle_btype(qpos);
@@ -1412,22 +1569,87 @@ __global__ void dnanm_forces_edge_nonbonded(const c_number4 __restrict__ *poss, 
 
     int interaction_type = get_particle_id_dnanm(pbtype) + get_particle_id_dnanm(qbtype);
     if (interaction_type == 2) {
+        if(!use_protein_protein_dh) {
         if(sqr_distance > MD_pro_sqr_rcut) return;
         //Protein-Protein Excluded Volume
         excluded_volume_quart(r, dF, MD_pro_sigma, MD_pro_rstar, MD_pro_b, MD_pro_rc);
+        if (dF.w != (c_number)0.f) {
+            atomicAdd(&(forces[from_index].w), dF.w);
+            atomicAdd(&(forces[to_index].w), dF.w);
+        }
 
         if(CUDA_DOT(dF, dF) > (c_number) 0.f) {
             LR_atomicAddXYZ(&(forces[from_index]), dF);
 
             if(update_st) {
                 CUDAStressTensor p_st;
-                _update_stress_tensor<false>(p_st, r, dF);
+                _update_stress_tensor<true>(p_st, r, dF);
                 LR_atomicAddST(&(st[b.from]), p_st);
+                LR_atomicAddST(&(st[b.to]), p_st);
             }
 
             LR_atomicAddXYZ(&(forces[to_index]), -dF);
         }
 
+        } else {
+
+        // PP electrostatics follows the V2 physical model, but is added
+        // without importing its general force-debug infrastructure.
+        const int physical_from = get_particle_index(ppos);
+        const int physical_to = get_particle_index(qpos);
+        const bool valid_index = physical_from >= 0 && physical_from < MD_N[0]
+                                  && physical_to >= 0 && physical_to < MD_N[0];
+        const bool pp_pair_allowed = valid_index && protein_charge != nullptr &&
+             protein_group != nullptr &&
+             !dnanm_is_affected_pair(physical_from,physical_to,affected_indx,affected) &&
+             (!exclude_intragroup_dh ||
+              protein_group[physical_from] != protein_group[physical_to]);
+        const bool pp_es_candidate = pp_pair_allowed &&
+            sqr_distance < SQR(MD_dh_RC[0]);
+        if(sqr_distance > MD_pro_sqr_rcut && !pp_es_candidate) return;
+        c_number4 Fpp_ev = make_c_number4(0,0,0,0);
+        if(sqr_distance < MD_pro_sqr_rcut) {
+            excluded_volume_quart(r,Fpp_ev,MD_pro_sigma,MD_pro_rstar,MD_pro_b,MD_pro_rc);
+        }
+        if (Fpp_ev.w != (c_number)0.f) {
+            atomicAdd(&(forces[from_index].w), Fpp_ev.w);
+            atomicAdd(&(forces[to_index].w), Fpp_ev.w);
+        }
+        c_number4 Fpp_es_from = make_c_number4(0,0,0,0);
+        if(pp_es_candidate) {
+            const c_number qq = protein_protein_dh_scale *
+                 protein_charge[physical_from] * protein_charge[physical_to];
+            c_number4 Fpp_es_to = make_c_number4(0,0,0,0);
+            dnanm_scaled_debye_huckel(r,qq,Fpp_es_to);
+            Fpp_es_from.x = -Fpp_es_to.x;
+            Fpp_es_from.y = -Fpp_es_to.y;
+            Fpp_es_from.z = -Fpp_es_to.z;
+            Fpp_es_from.w = Fpp_es_to.w;
+            if(Fpp_es_to.w != (c_number)0.f) {
+                atomicAdd(&(forces[from_index].w),Fpp_es_to.w);
+                atomicAdd(&(forces[to_index].w),Fpp_es_to.w);
+            }
+        }
+        dF = Fpp_ev + make_c_number4(Fpp_es_from.x,Fpp_es_from.y,Fpp_es_from.z,0);
+        if(CUDA_DOT(dF,dF) > (c_number)0.f) {
+            LR_atomicAddXYZ(&(forces[from_index]),dF);
+            LR_atomicAddXYZ(&(forces[to_index]),-dF);
+        }
+        if(update_st) {
+            if(CUDA_DOT(Fpp_ev,Fpp_ev) > (c_number)0.f) {
+                CUDAStressTensor st_ev;
+                _update_stress_tensor<true>(st_ev, r, Fpp_ev);
+                LR_atomicAddST(&(st[b.from]), st_ev);
+                LR_atomicAddST(&(st[b.to]), st_ev);
+            }
+            if(pp_es_candidate) {
+                CUDAStressTensor es_half;
+                _update_stress_tensor<true>(es_half,r,Fpp_es_from);
+                LR_atomicAddST(&(st[b.from]),es_half);
+                LR_atomicAddST(&(st[b.to]),es_half);
+            }
+        }
+        }
     } else if (interaction_type == 1) { // p is dna q is pro
         //Protein-DNA Excluded Volume **NONBONDED
         c_number4 nuc_back;
@@ -1458,29 +1680,82 @@ __global__ void dnanm_forces_edge_nonbonded(const c_number4 __restrict__ *poss, 
 
         c_number4 Ftmp = make_c_number4(0, 0, 0, 0);
         excluded_volume_quart(rback, Ftmp, MD_pro_backbone_sigma, MD_pro_backbone_rstar, MD_pro_backbone_b, MD_pro_backbone_rc);
+        Ftmp *= (c_number)(MD_pro_backbone_stiffness / EXCL_EPS);
         dT += _cross(nuc_back, Ftmp);
         dF += Ftmp;
 
         excluded_volume_quart(rbase, Ftmp, MD_pro_base_sigma, MD_pro_base_rstar, MD_pro_base_b, MD_pro_base_rc);
+        Ftmp *= (c_number)(MD_pro_base_stiffness / EXCL_EPS);
         dT += _cross(nuc_base, Ftmp);
         dF += Ftmp;
+
+
+        // Preserve upstream excluded-volume virial separately.
+        const c_number4 Fpd_ev_on_nuc = dF;
+        if (Fpd_ev_on_nuc.w != (c_number)0.f) {
+            atomicAdd(&(forces[*nucindx].w), Fpd_ev_on_nuc.w);
+            atomicAdd(&(forces[*proindx].w), Fpd_ev_on_nuc.w);
+        }
+        c_number4 Fpd_es_on_nuc = make_c_number4(0,0,0,0);
+        // Added PD screened electrostatics between the protein COM and
+        // the nucleotide backbone site. Charge vectors are indexed by stable
+        // physical IDs encoded in poss.w, not by sorted GPU slots.
+        if(use_protein_dna_dh && protein_charge != nullptr) {
+            const int physical = get_particle_index(pbtype > 4 ? ppos : qpos);
+            if(physical >= 0 && physical < MD_N[0]) {
+                c_number charge_product = -protein_dna_dh_scale * protein_charge[physical];
+                if(MD_dh_half_charged_ends[0] && (pbtype > 4 ? q_is_end : p_is_end))
+                    charge_product *= (c_number) 0.5f;
+                c_number4 force_pro = make_c_number4(0,0,0,0);
+                dnanm_scaled_debye_huckel(rback, charge_product, force_pro);
+                c_number4 force_nuc = -force_pro;
+                force_nuc.w = force_pro.w;
+                Fpd_es_on_nuc = force_nuc;
+                dT += _cross(nuc_back, force_nuc);
+                dF += force_nuc;
+            }
+        }
+
+        // CUDA pair-energy bookkeeping: electrostatic energy is symmetric.
+        if(Fpd_es_on_nuc.w != (c_number) 0.f) {
+            atomicAdd(&(forces[*nucindx].w), Fpd_es_on_nuc.w);
+            atomicAdd(&(forces[*proindx].w), Fpd_es_on_nuc.w);
+        }
 
         if(CUDA_DOT(dT, dT) > (c_number) 0.f) LR_atomicAddXYZ(&(torques[*nucindx]), dT);
         if (CUDA_DOT(dF, dF) > (c_number) 0.f){
             LR_atomicAddXYZ(&(forces[*nucindx]), dF);
 
-            if(update_st) {
-                CUDAStressTensor p_st;
-                _update_stress_tensor<false>(p_st, r, dF);
-                LR_atomicAddST(&(st[b.from]), p_st);
-            }
 
             LR_atomicAddXYZ(&(forces[*proindx]), -dF);
         }
 
+
+        if(update_st) {
+                if(CUDA_DOT(Fpd_ev_on_nuc,Fpd_ev_on_nuc) > (c_number) 0.f) {
+                    CUDAStressTensor ev_st;
+                    const c_number4 Fpd_ev_on_from = (pbtype > 4) ? -Fpd_ev_on_nuc : Fpd_ev_on_nuc;
+                    _update_stress_tensor<true>(ev_st, r, Fpd_ev_on_from);
+                    LR_atomicAddST(&(st[b.from]), ev_st);
+                    LR_atomicAddST(&(st[b.to]), ev_st);
+                }
+                if(use_protein_dna_dh && protein_charge != nullptr) {
+                    const c_number4 F_es_on_from =
+                        (pbtype > 4) ? -Fpd_es_on_nuc : Fpd_es_on_nuc;
+                    CUDAStressTensor es_half;
+                    _update_stress_tensor<true>(es_half, r, F_es_on_from);
+                    LR_atomicAddST(&(st[b.from]), es_half);
+                    LR_atomicAddST(&(st[b.to]), es_half);
+                }
+            }
     } else if(interaction_type == 0) { // dna- dna nonbonded
         _dna_particle_particle_DNA_interaction(r, ppos, a1, a2, a3, qpos, b1, b2, b3, dF, dT, grooving, use_debye_huckel,
                                            use_oxDNA2_coaxial_stacking, p_is_end, q_is_end);
+        // Stage9Z: preserve nonbonded DNA U_ij for single undirected edge.
+        if (dF.w != (c_number)0.f) {
+            atomicAdd(&(forces[from_index].w), dF.w);
+            atomicAdd(&(forces[to_index].w), dF.w);
+        }
 
         if(CUDA_DOT(dT, dT) > (c_number) 0.f) LR_atomicAddXYZ(&(torques[from_index]), dT);
         dT = -dT; // torque acting on particle q (which also has another contribution if dF > 0)
@@ -1490,8 +1765,11 @@ __global__ void dnanm_forces_edge_nonbonded(const c_number4 __restrict__ *poss, 
 
             if (update_st) {
                 CUDAStressTensor p_st;
-                _update_stress_tensor<false>(p_st, r, dF);
+                // Match the CPU pair convention: half at each endpoint.
+                // Their sum preserves the former full global virial.
+                _update_stress_tensor<true>(p_st, r, dF);
                 LR_atomicAddST(&(st[b.from]), p_st);
+                LR_atomicAddST(&(st[b.to]), p_st);
             }
 
             // Allen Eq. 6 pag 3:
@@ -1746,12 +2024,166 @@ __global__ void dnanm_forces_edge_nonbonded(const c_number4 __restrict__ *poss, 
 //
 //
 //
+
+// Isolated DNACT CUDA angular candidate. One thread per protein particle,
+// mirroring CPU _protein_ang_pot for each adjacent ANM-connected pair.
+// Each pair is visited from both ends; helper ang_pot writes half-energy
+// into each particle's force.w. Torques are converted LAB -> BODY once.
+__global__ void dnact_protein_angular_forces_candidate(
+    const c_number4 *__restrict__ poss,
+    const GPU_quat *__restrict__ orientations,
+    c_number4 *__restrict__ forces,
+    c_number4 *__restrict__ torques,
+    CUDABox *box,
+    const c_number *ang_params,
+    const c_number *ang_kbkt,
+    const int *affected_indx,
+    const int *affected,
+    bool update_st,
+    CUDAStressTensor *st,
+    const int *__restrict__ physical_to_slot
+) {
+    const int slot = IND;
+    if(slot >= MD_N[0]) return;
+    const int g = get_particle_index(poss[slot]);
+    if(g < 0 || g >= MD_N[0] || g < _offset || g >= _offset + _npro) return;
+    const int local = g - _offset;
+    if(ang_params == nullptr || affected_indx == nullptr || affected == nullptr) return;
+
+    c_number4 a1, a2, a3;
+    get_vectors_from_quat(orientations[slot], a1, a2, a3);
+    c_number4 total_f = make_c_number4(0, 0, 0, 0);
+    c_number4 total_t_lab = make_c_number4(0, 0, 0, 0);
+    CUDAStressTensor particle_stress;
+
+    for(int direction = -1; direction <= 1; direction += 2) {
+        const int neighbour_local = local + direction;
+        if(neighbour_local < 0 || neighbour_local >= _npro) continue;
+        const int neighbour_global = neighbour_local + _offset;
+        if(!dnanm_is_affected_pair(g, neighbour_global, affected_indx, affected)) continue;
+
+        const int first_local = direction < 0 ? neighbour_local : local;
+        const int first_global = first_local + _offset;
+        const int second_global = first_global + 1;
+        const int k = first_local * 4;
+        const c_number4 target = make_c_number4(
+            ang_params[k], ang_params[k+1], ang_params[k+2], ang_params[k+3]
+        );
+        c_number kbkt[2] = { _kb, _kt };
+        if(ang_kbkt != nullptr) {
+            kbkt[0] = ang_kbkt[first_local * 2];
+            kbkt[1] = ang_kbkt[first_local * 2 + 1];
+        }
+
+        c_number4 p1, p2, p3, q1, q2, q3;
+        get_vectors_from_quat(orientations[physical_to_slot[first_global]], p1, p2, p3);
+        get_vectors_from_quat(orientations[physical_to_slot[second_global]], q1, q2, q3);
+        const c_number4 r = box->minimum_image(poss[physical_to_slot[first_global]], poss[physical_to_slot[second_global]]);
+
+        c_number4 pair_f = make_c_number4(0, 0, 0, 0);
+        c_number4 pair_t = make_c_number4(0, 0, 0, 0);
+        if(direction < 0) {
+            // This particle is the SECOND particle of the pair.
+            ang_pot<true>(pair_f, pair_t, p1, p3, q1, q3, r, target, kbkt);
+        } else {
+            // This particle is the FIRST particle of the pair.
+            ang_pot<false>(pair_f, pair_t, p1, p3, q1, q3, r, target, kbkt);
+        }
+        // Only angular physics belongs to this CSR-adjacent loop.
+        // ang_pot supplies half-energy per endpoint; the CUDA reduction
+        // divides the two-endpoint sum by 2*N.
+        pair_f.w *= (c_number) 2.0f;
+        total_f += pair_f;
+        total_t_lab += pair_t;
+        if(update_st) {
+            const c_number4 lever = box->minimum_image(poss[slot], poss[physical_to_slot[neighbour_global]]);
+            _update_stress_tensor<true>(particle_stress, lever, pair_f);
+        }
+    }
+
+    // This kernel runs after the DNA/spring kernels, avoiding races with
+    // those kernels. Atomic additions preserve pre-existing force/torque.
+    LR_atomicAdd(&forces[slot], total_f);
+    const c_number4 total_t_body =
+        _vectors_transpose_c_number4_product(a1, a2, a3, total_t_lab);
+    LR_atomicAdd(&torques[slot], total_t_body);
+    if(update_st) st[slot] += particle_stress;
+}
+
+// Restore central PP interactions excluded by the CUDA list's actual
+// n3/n5 links. These links need not be adjacent or connected in the ANM CSR.
+// The host validates reciprocal links; duplicate n3/n5 slots count once.
+// Each endpoint gets its full force and a full pair energy in w. The
+// reduction sum(w)/(2*N) yields energy per particle; virial is half-shared.
+// Central COM interactions do not generate a torque.
+__global__ void dnact_protein_excluded_pairs(
+    const c_number4 *__restrict__ poss,
+    c_number4 *__restrict__ forces,
+    const LR_bonds *__restrict__ bonds,
+    CUDABox *box,
+    const c_number *protein_charge,
+    const int *protein_group,
+    bool use_protein_protein_dh,
+    bool exclude_intragroup_dh,
+    c_number protein_protein_dh_scale,
+    const int *affected_indx,
+    const int *affected,
+    bool update_st,
+    CUDAStressTensor *st
+) {
+    const int slot = IND;
+    if(slot >= MD_N[0]) return;
+    const int physical = get_particle_index(poss[slot]);
+    if(physical < _offset || physical >= _offset + _npro) return;
+    const LR_bonds links = bonds[slot];
+    const int neighbours[2] = {links.n3, links.n5};
+    c_number4 total_f = make_c_number4(0, 0, 0, 0);
+    CUDAStressTensor particle_stress;
+    for(int side = 0; side < 2; ++side) {
+        const int other_slot = neighbours[side];
+        if(other_slot == P_INVALID) continue;
+        if(side == 1 && other_slot == neighbours[0]) continue;
+        // The host rejects invalid links before any force evaluation.
+        if(other_slot < 0 || other_slot >= MD_N[0] || other_slot == slot) continue;
+        const int other_physical = get_particle_index(poss[other_slot]);
+        if(other_physical < _offset || other_physical >= _offset + _npro) continue;
+        const c_number4 r = box->minimum_image(poss[slot], poss[other_slot]);
+        c_number4 pair_f = make_c_number4(0, 0, 0, 0);
+        excluded_volume_quart(r, pair_f,
+            MD_pro_sigma, MD_pro_rstar, MD_pro_b, MD_pro_rc);
+        // A topology link without an ANM spring is nonbonded on the CPU.
+        // Its DH term is also removed by the CUDA n3/n5 list exclusion.
+        const bool pp_dh_allowed = use_protein_protein_dh &&
+            protein_charge != nullptr && protein_group != nullptr &&
+            !dnanm_is_affected_pair(physical, other_physical, affected_indx, affected) &&
+            (!exclude_intragroup_dh || protein_group[physical] != protein_group[other_physical]);
+        if(pp_dh_allowed) {
+            const c_number qq = protein_protein_dh_scale *
+                protein_charge[physical] * protein_charge[other_physical];
+            c_number4 force_on_other = make_c_number4(0, 0, 0, 0);
+            dnanm_scaled_debye_huckel(r, qq, force_on_other);
+            pair_f.x -= force_on_other.x;
+            pair_f.y -= force_on_other.y;
+            pair_f.z -= force_on_other.z;
+            pair_f.w += force_on_other.w;
+        }
+        total_f += pair_f;
+        if(update_st)
+            _update_stress_tensor<true>(particle_stress, r, pair_f);
+    }
+    LR_atomicAdd(&forces[slot], total_f);
+    if(update_st) st[slot] += particle_stress;
+}
+
 __global__ void protein_forces_edge_bonded(const c_number4 __restrict__ *poss, const GPU_quat __restrict__ *orientations, c_number4 __restrict__ *forces,
                                        c_number4 __restrict__ *torques, const LR_bonds __restrict__ *bonds, bool grooving, bool use_oxDNA2_FENE, bool use_mbf, c_number mbf_xmax,
-                                       c_number mbf_finf, CUDABox *box, bool update_st, CUDAStressTensor *st, c_number *_d_aff_eqdist, c_number *_d_aff_gamma, int *_d_affected_indx, int *_d_affected) {
+                                       c_number mbf_finf, CUDABox *box, bool update_st, CUDAStressTensor *st, c_number *_d_aff_eqdist, c_number *_d_aff_gamma, int *_d_affected_indx, int *_d_affected, const int *__restrict__ physical_to_slot) {
     if(IND >= MD_N[0]) return;
-    if(IND < _offset) return;
-    if(IND >= _offset+_npro) return;
+    // Identify protein using physical bead identity, not the GPU array slot.
+    const int anm_physical_id = get_particle_index(poss[IND]);
+    if(anm_physical_id < 0 || anm_physical_id >= MD_N[0]) return;
+    if(anm_physical_id < _offset) return;
+    if(anm_physical_id >= _offset+_npro) return;
 
 
     c_number4 dF = make_c_number4(0, 0, 0, 0);
@@ -1759,14 +2191,14 @@ __global__ void protein_forces_edge_bonded(const c_number4 __restrict__ *poss, c
 
     c_number4 ppos = poss[IND];
 
-    int &lb = _d_affected_indx[IND-_offset];
-    int &ub = _d_affected_indx[IND-_offset+1];
+    int &lb = _d_affected_indx[anm_physical_id-_offset];
+    int &ub = _d_affected_indx[anm_physical_id-_offset+1];
 
     CUDAStressTensor p_st;
 
     for(int i = lb; i < ub; i++) {
         int j = _d_affected[i];
-        c_number4 r = box->minimum_image(ppos, poss[j + _offset]);
+        c_number4 r = box->minimum_image(ppos, poss[physical_to_slot[j + _offset]]);
         c_number d = _module(r);
 
         c_number &gamma = _d_aff_gamma[i];
@@ -1775,7 +2207,7 @@ __global__ void protein_forces_edge_bonded(const c_number4 __restrict__ *poss, c
         c_number fmod = (-1.0f * gamma) * (d - eqdist) / d;
 
         dF = fmod * r;
-        dF.w = 0.5f * (0.5f * gamma * SQR(d - eqdist));
+        dF.w = +1.0f * (0.5f * gamma * SQR(d - eqdist)); // STAGE9X_POSITIVE_ANM_W_ONLY
 
         ftotal -= dF;
         if(update_st){
@@ -1795,7 +2227,10 @@ __global__ void dna_forces_edge_bonded_dnanm(const c_number4 __restrict__ *poss,
                                        c_number4 __restrict__ *torques, const LR_bonds __restrict__ *bonds, bool grooving, bool use_oxDNA2_FENE, bool use_mbf, c_number mbf_xmax,
                                        c_number mbf_finf, bool update_st, CUDAStressTensor *st){
     if(IND >= MD_N[0]) return;
-    if(IND >= _offset && IND < _offset+_npro) return;
+    // GPU order may change; original physical ID must classify DNA vs protein.
+    const int dna_bond_physical_id = get_particle_index(poss[IND]);
+    if(dna_bond_physical_id < 0 || dna_bond_physical_id >= MD_N[0]) return;
+    if(dna_bond_physical_id >= _offset && dna_bond_physical_id < _offset+_npro) return;
 
     c_number4 F = forces[IND];
     c_number4 T = torques[IND];

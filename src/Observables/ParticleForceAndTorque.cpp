@@ -8,6 +8,7 @@
 #include "ParticleForceAndTorque.h"
 
 #include "../Utilities/Utils.h"
+#include "../Utilities/oxDNAException.h"
 
 ParticleForceAndTorque::ParticleForceAndTorque() {
 
@@ -19,6 +20,13 @@ ParticleForceAndTorque::~ParticleForceAndTorque() {
 
 void ParticleForceAndTorque::get_settings(input_file &my_inp, input_file &sim_inp) {
 	BaseObservable::get_settings(my_inp, sim_inp);
+
+	std::string backend;
+	getInputString(&sim_inp, "backend", backend, 0);
+	if(backend == "CUDA") {
+		throw oxDNAException("force_and_torque does not export native CUDA force/torque buffers; "
+			"this observable is restricted to CPU until a native export is qualified");
+	}
 
 	getInputString(&my_inp, "particle", _particle_string, 1);
 	getInputBool(&my_inp, "lab_frame", &_lab_frame, 0);

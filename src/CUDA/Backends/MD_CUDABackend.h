@@ -51,6 +51,7 @@ protected:
 	int _update_st_every = 0;
 	bool _update_particle_st = false;
 
+	bool _gate29_forced_sort_done = false; // private sorting proof only
 	bool _print_energy;
 
 	std::shared_ptr<CUDABaseThermostat> _cuda_thermostat;
@@ -59,6 +60,8 @@ protected:
 	std::shared_ptr<CUDABrownianThermostat> _cuda_barostat_thermostat;
 
 	CUDA_trap *_d_ext_forces;
+	// G50R: maps are active only for sorting with mutual traps.
+	int *_g50r_p2s, *_g50r_s2p, *_g50r_buff_s2p;
 	int _max_ext_forces;
 
 	virtual void _gpu_to_host();

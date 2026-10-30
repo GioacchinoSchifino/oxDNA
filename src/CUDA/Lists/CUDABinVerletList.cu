@@ -27,6 +27,8 @@ void CUDABinVerletList::_init_CUDA_verlet_symbols() {
 	float f_copy = _box_side;
 	CUDA_SAFE_CALL(cudaMemcpyToSymbol(bverlet_box_side, &f_copy, sizeof(float)));
 	CUDA_SAFE_CALL(cudaMemcpyToSymbol(bverlet_N, &this->_N, sizeof(int)));
+	const int matrix_capacity = max(_max_neigh[0], _max_neigh[1]);
+	CUDA_SAFE_CALL(cudaMemcpyToSymbol(bverlet_max_neigh, &matrix_capacity, sizeof(int)));
 	CUDA_SAFE_CALL(cudaMemcpyToSymbol(bverlet_N_cells_side, this->_N_cells_side, 3 * sizeof(int)));
 	CUDA_SAFE_CALL(cudaMemcpyToSymbol(bverlet_max_N_per_cell, this->_max_N_per_cell, 3 * sizeof(int)));
 	CUDA_SAFE_CALL(cudaMemcpyToSymbol(bverlet_cells_offset, this->_cells_offset, 3 * sizeof(int)));
@@ -107,6 +109,7 @@ void CUDABinVerletList::init(int N, c_number rcut, CUDABox*h_cuda_box, CUDABox*d
 	CUDA_SAFE_CALL(GpuUtils::LR_cudaMalloc<int>(&this->_d_cells, cells_mem));
 
 	CUDA_SAFE_CALL(cudaMallocHost(&this->_d_cell_overflow, sizeof(bool), cudaHostAllocDefault));
+	CUDA_SAFE_CALL(cudaMalloc(&this->_d_neighbour_overflow, sizeof(int)));
 	this->_d_cell_overflow[0] = false;
 
 	if(_cells_kernel_cfg.threads_per_block == 0) _cells_kernel_cfg.threads_per_block = 64;
@@ -122,6 +125,7 @@ void CUDABinVerletList::init(int N, c_number rcut, CUDABox*h_cuda_box, CUDABox*d
 void CUDABinVerletList::update(c_number4 *poss, c_number4 *list_poss, LR_bonds *bonds) {
 	// reset cells
 	CUDA_SAFE_CALL(cudaMemset(this->_d_counters_cells, 0, _counters_mem));
+	CUDA_SAFE_CALL(cudaMemset(this->_d_neighbour_overflow, 0, sizeof(int)));
 
 	// fill cells
 	bin_fill_cells
@@ -135,15 +139,18 @@ void CUDABinVerletList::update(c_number4 *poss, c_number4 *list_poss, LR_bonds *
 	// generate Verlet's lists
 	bin_update_self_neigh_list
 		<<<_cells_kernel_cfg.blocks, _cells_kernel_cfg.threads_per_block>>>
-		(poss, list_poss, this->_d_cells, this->_d_counters_cells, this->d_matrix_neighs, this->d_number_neighs);
+		(poss, list_poss, this->_d_cells, this->_d_counters_cells, this->d_matrix_neighs, this->d_number_neighs, this->_d_neighbour_overflow);
 	CUT_CHECK_ERROR("bin_update_self_neigh_list (BinVerlet) error");
 
 	bin_update_mixed_neigh_list
 		<<<_cells_kernel_cfg.blocks, _cells_kernel_cfg.threads_per_block>>>
-		(poss, this->_d_cells, this->_d_counters_cells, this->d_matrix_neighs, this->d_number_neighs);
+		(poss, this->_d_cells, this->_d_counters_cells, this->d_matrix_neighs, this->d_number_neighs, this->_d_neighbour_overflow);
 	CUT_CHECK_ERROR("bin_update_mixed_neigh_list (BinVerlet) error");
+	int host_overflow = 0;
+	CUDA_SAFE_CALL(cudaMemcpy(&host_overflow, this->_d_neighbour_overflow, sizeof(int), cudaMemcpyDeviceToHost));
+	if(host_overflow) throw oxDNAException("BinVerlet neighbor matrix capacity exceeded; fail-closed");
 }
 
 void CUDABinVerletList::clean() {
-
+	CUDASimpleVerletList::clean();
 }

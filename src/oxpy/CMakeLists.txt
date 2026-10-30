@@ -90,6 +90,10 @@ IF(Python)
 	# Compute the oxpy version from the git tag (set by the top-level CMakeLists.txt)
 	# Strip the leading 'v' if present (e.g. "v3.7.0" -> "3.7.0")
 	string(REGEX REPLACE "^v" "" OXPY_VERSION "${tag}")
+	# Derivative's human-readable build label is not a valid PEP 440 package version.
+	# e.g. oxDNA-ANM-1.1.0-rc4-dev -> 1.1.0rc4, without changing the executable label.
+	string(REGEX REPLACE "^oxDNA-ANM-" "" OXPY_VERSION "${OXPY_VERSION}")
+	string(REGEX REPLACE "-rc([0-9]+)(-dev)?$" "rc\\1" OXPY_VERSION "${OXPY_VERSION}")
 
 	# Copy the Python files into the staging directory
 	configure_file(${CMAKE_SOURCE_DIR}/src/oxpy/__init__.py ${OXPY_PACKAGE_DIR}/__init__.py COPYONLY)

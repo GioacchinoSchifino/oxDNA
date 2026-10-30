@@ -69,7 +69,7 @@ void MDBackend::get_settings(input_file &inp) {
 	_obs_output_file = std::make_shared<ObservableOutput>(fake);
 	add_output(_obs_output_file);
 	_obs_output_file->add_observable("type = step\nunits = MD");
-	_obs_output_file->add_observable("type = total_energy");
+	_obs_output_file->add_observable("type = total_energy\nprecision = 15");
 	if(_use_barostat) {
 		_obs_output_file->add_observable("type = density");
 	}
@@ -84,7 +84,7 @@ void MDBackend::get_settings(input_file &inp) {
 		add_output(_obs_output_stdout);
 		_obs_output_stdout->add_observable("type = step");
 		_obs_output_stdout->add_observable("type = step\nunits = MD");
-		_obs_output_stdout->add_observable("type = total_energy");
+		_obs_output_stdout->add_observable("type = total_energy\nprecision = 15");
 		if(_use_barostat) {
 			_obs_output_stdout->add_observable("type = density");
 		}

@@ -30,11 +30,13 @@ void Pressure::get_settings(input_file &my_inp, input_file &sim_inp) {
 }
 
 std::string Pressure::get_output_string(llint curr_step) {
+	StressTensor stress_tensor;
 	if(!_custom_stress_tensor || !_config_info->interaction->has_custom_stress_tensor()) {
-		_config_info->interaction->compute_standard_stress_tensor();
+		stress_tensor = _config_info->interaction->compute_standard_stress_tensor_isolated();
 	}
-
-	StressTensor stress_tensor = _config_info->interaction->stress_tensor();
+	else {
+		stress_tensor = _config_info->interaction->stress_tensor();
+	}
 	if(_PV_only) {
 		for(auto &v : stress_tensor) {
 			v *= _config_info->box->V();

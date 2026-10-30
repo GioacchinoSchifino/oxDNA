@@ -1,0 +1,84 @@
+name: ANM Electrostatics CPU Regression
+
+on:
+  push:
+    branches:
+      - main
+      - release/v1.1.0-rc
+      - staging/v1.1.0-20261029
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cpu-regression:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout exact commit
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Configure CPU double precision
+        run: |
+          cmake -S . -B build \
+            -DCUDA=OFF \
+            -DDOUBLE=ON \
+            -DNATIVE_COMPILATION=OFF \
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: Compile oxDNA
+        run: |
+          cmake --build build --target oxDNA --parallel 2
+          test -x build/bin/oxDNA
+
+      - name: Validate Python test syntax
+        run: |
+          python -m compileall -q test/DNANM/protein_electrostatics
+
+      - name: Run targeted CPU regressions
+        env:
+          OXDNA_BIN: ${{ github.workspace }}/build/bin/oxDNA
+          OXDNA_REPO: ${{ github.workspace }}
+        run: |
+          set -Eeuo pipefail
+          T=test/DNANM/protein_electrostatics
+
+          python -B "$T/test_source_contract.py"
+          python -B "$T/test_analytical_physics_core.py"
+          python -B "$T/test_pairenergy_term_registration.py"
+          python -B "$T/test_stress_tensor.py"
+          python -B "$T/test_dnact_cpu_nonzero_coexistence.py"
+          python -B "$T/test_surface_contract.py"
+
+      - name: Verify independent CUDA error handler using host mock only
+        run: |
+          bash test/CUDA_RUNTIME_ERROR_CHECK/run_mock.sh
+
+      - name: Exercise charge preparation and CPU-only negative cases
+        env:
+          OXDNA_BIN: ${{ github.workspace }}/build/bin/oxDNA
+          OXDNA_REPO: ${{ github.workspace }}
+          OXDNA_TEST_CPU_ONLY: '1'
+        run: |
+          set -Eeuo pipefail
+          T=test/DNANM/protein_electrostatics
+          python -B "$T/test_charge_utility_runtime.py"
+          python -B "$T/test_valid_charge_runtime.py"
+          python -B "$T/test_fail_closed_matrix.py"
+          echo "CUDA runtime cases intentionally excluded; qualified separately on GH200"
+
+      - name: Report scope
+        run: |
+          echo "CPU regressions completed."
+          echo "CUDA GH200 qualification is documented separately."
+          echo "This workflow does not certify unsupported CUDA modes."

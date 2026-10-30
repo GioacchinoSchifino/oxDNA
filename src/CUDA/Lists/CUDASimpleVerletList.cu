@@ -36,6 +36,10 @@ void CUDASimpleVerletList::clean() {
 		CUDA_SAFE_CALL(cudaFree(d_matrix_neighs));
 		CUDA_SAFE_CALL(cudaFree(d_number_neighs));
 		CUDA_SAFE_CALL(cudaFreeHost(_d_cell_overflow));
+		if(_d_neighbour_overflow != nullptr) {
+			CUDA_SAFE_CALL(cudaFree(_d_neighbour_overflow));
+			_d_neighbour_overflow = nullptr;
+		}
 	}
 
 	if(_use_edge && d_edge_list != nullptr) {
@@ -182,6 +186,7 @@ void CUDASimpleVerletList::init(int N, c_number rcut, CUDABox *h_cuda_box, CUDAB
 	CUDA_SAFE_CALL(GpuUtils::LR_cudaMalloc(&d_matrix_neighs, (size_t ) _N * _max_neigh * sizeof(int)));
 
 	CUDA_SAFE_CALL(cudaMallocHost(&_d_cell_overflow, sizeof(bool), cudaHostAllocDefault));
+	CUDA_SAFE_CALL(cudaMalloc(&_d_neighbour_overflow, sizeof(int)));
 	_d_cell_overflow[0] = false;
 
 	if(_use_edge) {
@@ -199,6 +204,7 @@ void CUDASimpleVerletList::init(int N, c_number rcut, CUDABox *h_cuda_box, CUDAB
 	float f_copy = _sqr_rverlet;
 	CUDA_SAFE_CALL(cudaMemcpyToSymbol(verlet_sqr_rverlet, &f_copy, sizeof(float)));
 	CUDA_SAFE_CALL(cudaMemcpyToSymbol(verlet_N, &_N, sizeof(int)));
+	CUDA_SAFE_CALL(cudaMemcpyToSymbol(verlet_max_neigh, &_max_neigh, sizeof(int)));
 }
 
 #define PROBLEMATIC_THRESHOLD 1.e7
@@ -231,6 +237,7 @@ std::vector<int> CUDASimpleVerletList::is_large(c_number4 *data) {
 void CUDASimpleVerletList::update(c_number4 *poss, c_number4 *list_poss, LR_bonds *bonds) {
 	_init_cells(poss);
 	CUDA_SAFE_CALL(cudaMemset(_d_counters_cells, 0, _N_cells * sizeof(int)));
+	CUDA_SAFE_CALL(cudaMemset(_d_neighbour_overflow, 0, sizeof(int)));
 
 	// fill cells
 	simple_fill_cells
@@ -266,8 +273,12 @@ void CUDASimpleVerletList::update(c_number4 *poss, c_number4 *list_poss, LR_bond
 	if(_use_edge) {
 		edge_update_neigh_list
 			<<<_cells_kernel_cfg.blocks, _cells_kernel_cfg.threads_per_block>>>
-			(_counters_cells_tex, poss, list_poss, _d_cells, d_matrix_neighs, d_number_neighs, _d_number_neighs_no_doubles, bonds, _d_cuda_box);
+			(_counters_cells_tex, poss, list_poss, _d_cells, d_matrix_neighs, d_number_neighs, _d_number_neighs_no_doubles, bonds, _d_cuda_box, _d_neighbour_overflow);
 		CUT_CHECK_ERROR("edge_update_neigh_list (SimpleVerlet) error");
+
+		int host_overflow = 0;
+		CUDA_SAFE_CALL(cudaMemcpy(&host_overflow, _d_neighbour_overflow, sizeof(int), cudaMemcpyDeviceToHost));
+		if(host_overflow) throw oxDNAException("SimpleVerlet edge neighbor matrix capacity exceeded; fail-closed");
 
 		// thrust operates on the GPU
 		thrust::device_ptr<int> d_number_neighs_no_doubles_w(_d_number_neighs_no_doubles);
@@ -283,7 +294,10 @@ void CUDASimpleVerletList::update(c_number4 *poss, c_number4 *list_poss, LR_bond
 	else {
 		simple_update_neigh_list
 			<<<_cells_kernel_cfg.blocks, _cells_kernel_cfg.threads_per_block>>>
-			(_counters_cells_tex, poss, list_poss, _d_cells, d_matrix_neighs, d_number_neighs, bonds, _d_cuda_box);
+			(_counters_cells_tex, poss, list_poss, _d_cells, d_matrix_neighs, d_number_neighs, bonds, _d_cuda_box, _d_neighbour_overflow);
 		CUT_CHECK_ERROR("update_neigh_list (SimpleVerlet) error");
+		int host_overflow = 0;
+		CUDA_SAFE_CALL(cudaMemcpy(&host_overflow, _d_neighbour_overflow, sizeof(int), cudaMemcpyDeviceToHost));
+		if(host_overflow) throw oxDNAException("SimpleVerlet neighbor matrix capacity exceeded; fail-closed");
 	}
 }

@@ -53,6 +53,7 @@ protected:
 	bool _has_stress_tensor;
 	/// Step at which the stress tensor was last updated. -1 means never updated.
 	llint _stress_tensor_step;
+	bool _suppress_custom_stress_updates = false;
 
 	StressTensor _sum_particle_stress_tensors() const;
 
@@ -138,9 +139,11 @@ public:
 	 */
 	virtual bool has_custom_stress_tensor() const;
 
+	number pair_interaction_without_stress_updates(BaseParticle *p, BaseParticle *q, bool compute_r, bool update_forces);
 	void reset_stress_tensor();
 
 	void compute_standard_stress_tensor();
+	StressTensor compute_standard_stress_tensor_isolated();
 
 	StressTensor stress_tensor() const;
 	const std::vector<StressTensor> &particle_stress_tensors() const;

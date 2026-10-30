@@ -22,11 +22,11 @@ BoxInteraction::~BoxInteraction() {
 void BoxInteraction::get_settings(input_file &inp) {
 	BaseInteraction::get_settings(inp);
 	char tmps[512];
-	getInputString(&inp, "sim_type", (char *) tmps, 1);
+	getInputString(&inp, "sim_type", tmps, 1);
 	if(strncmp(tmps, "MC", 512)) throw oxDNAException("Cannot run Box with MD");
 
 	// let's get the three dimension
-	getInputString(&inp, "box_sides", (char *) tmps, 1);
+	getInputString(&inp, "box_sides", tmps, 1);
 	float tmpf[3];
 
 	int tmpi = sscanf(tmps, "%g, %g, %g", tmpf, tmpf + 1, tmpf + 2);

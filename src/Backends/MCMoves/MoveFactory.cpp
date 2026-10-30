@@ -27,6 +27,11 @@ MovePtr MoveFactory::make_move(input_file &inp, input_file &sim_inp) {
 
 	std::string move_type;
 	getInputString(&inp, "type", move_type, 0);
+    std::string interaction_type;
+    getInputString(&sim_inp, "interaction_type", interaction_type, 0);
+    if((interaction_type == "DNANM" || interaction_type == "DNACT") &&
+       (move_type == "volume" || move_type == "molecule_volume" || move_type == "shape"))
+        throw oxDNAException("DNANM/DNACT MC2 box moves are not qualified in v1.1.0");
 
 	if(!move_type.compare("rotation")) ret = std::make_shared<MCRot>();
 	else if(!move_type.compare("translation")) ret = std::make_shared<MCTras>();

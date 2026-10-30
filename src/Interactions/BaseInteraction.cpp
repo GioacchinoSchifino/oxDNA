@@ -163,6 +163,7 @@ StressTensor BaseInteraction::_sum_particle_stress_tensors() const {
 }
 
 void BaseInteraction::_update_stress_tensor(const LR_vector &r_p, const LR_vector &group_force) {
+	if(_suppress_custom_stress_updates) return;
 	_has_stress_tensor = true;
 	_has_particle_stress_tensors = false;
 
@@ -175,6 +176,7 @@ void BaseInteraction::_update_stress_tensor(const LR_vector &r_p, const LR_vecto
 }
 
 void BaseInteraction::_update_stress_tensor(BaseParticle *p, BaseParticle *q, const LR_vector &r_p, const LR_vector &group_force) {
+	if(_suppress_custom_stress_updates) return;
 	_has_stress_tensor = true;
 	_has_particle_stress_tensors = true;
 
@@ -203,6 +205,26 @@ void BaseInteraction::_update_stress_tensor(BaseParticle *p, BaseParticle *q, co
 		_particle_stress_tensors[p->index][i] += half;
 		_particle_stress_tensors[q->index][i] += half;
 	}
+}
+
+number BaseInteraction::pair_interaction_without_stress_updates(
+    BaseParticle *p, BaseParticle *q, bool compute_r, bool update_forces
+) {
+    // Calculate pair forces without modifying shared custom stress.
+    const bool old_suppression = _suppress_custom_stress_updates;
+    _suppress_custom_stress_updates = true;
+
+    try {
+        const number energy =
+            pair_interaction(p, q, compute_r, update_forces);
+
+        _suppress_custom_stress_updates = old_suppression;
+        return energy;
+    }
+    catch(...) {
+        _suppress_custom_stress_updates = old_suppression;
+        throw;
+    }
 }
 
 void BaseInteraction::compute_standard_stress_tensor() {
@@ -291,6 +313,58 @@ void BaseInteraction::compute_standard_stress_tensor() {
 	_has_particle_stress_tensors = true;
 	_has_stress_tensor = true;
 	_stress_tensor_step = CONFIG_INFO->curr_step;
+}
+
+
+StressTensor BaseInteraction::compute_standard_stress_tensor_isolated() {
+    const bool had_tensor = _has_stress_tensor;
+    StressTensor old_tensor = {0., 0., 0., 0., 0., 0.};
+    if(had_tensor) old_tensor = _stress_tensor;
+
+    const auto old_particle_tensors = _particle_stress_tensors;
+    const bool had_particles = _has_particle_stress_tensors;
+    const auto old_step = _stress_tensor_step;
+    const bool old_suppress = _suppress_custom_stress_updates;
+    const LR_vector old_r = _computed_r;
+    const bool old_infinite = _is_infinite;
+
+    const auto particles = CONFIG_INFO->particles();
+    std::vector<LR_vector> forces, torques;
+
+    forces.reserve(particles.size());
+    torques.reserve(particles.size());
+
+    for(auto p : particles) {
+        forces.push_back(p->force);
+        torques.push_back(p->torque);
+    }
+
+    auto restore = [&]() {
+        for(size_t i = 0; i < particles.size(); ++i) {
+            particles[i]->force = forces[i];
+            particles[i]->torque = torques[i];
+        }
+        _stress_tensor = old_tensor;
+        _particle_stress_tensors = old_particle_tensors;
+        _has_stress_tensor = had_tensor;
+        _has_particle_stress_tensors = had_particles;
+        _stress_tensor_step = old_step;
+        _suppress_custom_stress_updates = old_suppress;
+        _computed_r = old_r;
+        _is_infinite = old_infinite;
+    };
+
+    try {
+        _suppress_custom_stress_updates = true;
+        compute_standard_stress_tensor();
+        StressTensor result = stress_tensor();
+        restore();
+        return result;
+    }
+    catch(...) {
+        restore();
+        throw;
+    }
 }
 
 bool BaseInteraction::has_custom_stress_tensor() const {
