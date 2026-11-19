@@ -16,10 +16,10 @@ jobs:
         run: cmake -S . -B build -DCUDA=OFF
       - name: Compile
         run: cmake --build build --parallel 2
-      - name: Existing quick regression
-        run: cmake --build build --target test_quick
       - name: Screened protein electrostatics analytical regression
         run: |
           OXDNA_BIN="$PWD/build/bin/oxDNA" python3 -m unittest \
             discover -s test/DNANM/protein_electrostatics \
             -p 'test_*.py' -v
+      - name: Existing quick regression
+        run: cmake --build build --target test_quick
