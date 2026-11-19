@@ -207,12 +207,12 @@ def test_cli_parser_defaults():
     assert args.group_file is None
 
 
-def test_main_writes_file(tmp_path, topology, capfd):
+def test_main_writes_file(tmp_path, topology):
     out = tmp_path / "charges.txt"
     with patch.object(sys, 'argv', ["protein_charges.py", topology, str(out), "--his-charge", "0.1"]):
         main()
     assert out.exists()
-    assert "Net protein charge" in capfd.readouterr().err
+    assert "# DNANM_ES_CHARGES 1" in out.read_text()
     assert float(read_data_rows(out)[2][3]) == pytest.approx(0.1)
 
 
