@@ -86,6 +86,25 @@ decimate(align_output, decimate_output, ncpus=5, start=200, stride=10)
 .. autoclass:: oxDNA_analysis_tools.anm_fluctuation_solver.ANMNetwork
 ```
 
+## Protein charges
+
+\`\`\`{eval-rst}
+.. currentmodule:: oxDNA_analysis_tools
+
+.. autosummary::
+    :nosignatures:
+
+    protein_charges.protein_charges
+    protein_charges.read_protein_topology
+    protein_charges.pqr_charges
+
+.. autofunction:: oxDNA_analysis_tools.protein_charges.protein_charges
+.. autofunction:: oxDNA_analysis_tools.protein_charges.read_protein_topology
+.. autofunction:: oxDNA_analysis_tools.protein_charges.simple_charges
+.. autofunction:: oxDNA_analysis_tools.protein_charges.pqr_charges
+.. autofunction:: oxDNA_analysis_tools.protein_charges.assign_groups
+\`\`\`
+
 ## Backbone flexibility
 
 ```{eval-rst}

@@ -37,6 +37,24 @@ oat anm_fluctuation_solver protein.pdb -o protein -m anmt --plot protein_bfactor
     :prog: oat anm_fluctuation_solver
 ```
 
+## Protein charges
+
+Generate effective residue charges for screened ANM protein electrostatics in
+\`DNANM\`/\`DNACT\` (CPU). Legacy and new-style \`type=peptide\` topologies
+are supported. The default sequence model assigns K/R=+1, D/E=-1, H=0;
+\`--pqr\` uses per-residue atomic charge sums from PDB2PQR/PROPKA. If
+identical peptide sequences appear in multiple PQR chains, specify
+\`--pqr-chain-order\` explicitly to prevent assigning charges to the wrong
+subunit. Each bead is a point charge; the generated file is not a full
+atomistic charge distribution or automatic pKa prediction.
+
+\`\`\`{eval-rst}
+.. argparse::
+    :filename: ../analysis/src/oxDNA_analysis_tools/protein_charges.py
+    :func: cli_parser
+    :prog: oat protein_charges
+\`\`\`
+
 ## Backbone flexibility
 
 ```{eval-rst}
