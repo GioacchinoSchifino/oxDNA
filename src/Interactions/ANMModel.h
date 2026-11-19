@@ -74,7 +74,7 @@ public:
 	void unlink_unbonded_neighbours(std::vector<BaseParticle *> &particles);
 
 	/// parses the parameter file without touching the particles (used by the CUDA interactions)
-	void parse_parameter_file(int N_particles);
+	void parse_parameter_file(const std::vector<BaseParticle *> &particles);
 
 	/// sets the mass of all the amino acids from the mass file (or the default masses)
 	void set_masses(std::vector<BaseParticle *> &particles);
@@ -165,7 +165,7 @@ private:
 	number _protein_nucleotide_sqr_rcut;
 
 	void _load_massfile(const std::string &filename);
-	void _parse_parameter_file(int N_particles, const std::function<void(int, int)> &on_spring);
+	void _parse_parameter_file(const std::vector<BaseParticle *> &particles, const std::function<void(int, int)> &on_spring);
 	number _repulsive_lj(const RepulsiveLJ &lj, const LR_vector &r, LR_vector &force, bool update_forces) const;
 };
 

@@ -1,0 +1,43 @@
+name: PR236 verified-anomaly regression
+
+on:
+  push:
+    branches:
+      - fix/pr236-anm-audit-20261119
+  workflow_dispatch:
+
+jobs:
+  cpu:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile CPU and linked OAT
+        run: |
+          cmake -S . -B build -DCUDA=OFF
+          cmake --build build -j2
+      - name: Confirm DNANM/DNACT energy consistency and interchain spring
+        run: |
+          python3 test/DNANM/audit_pr236_angular_energy.py --binary build/bin/oxDNA | tee /tmp/energy_audit.log
+          grep -q "DNACT accepts cross-chain adjacent-index spring" /tmp/energy_audit.log
+          grep -q "NO ANGULAR DIFFERENCE VISIBLE" /tmp/energy_audit.log
+      - name: Confirm numeric base notation in mixed peptide-DNA topologies
+        run: |
+          python3 test/DNANM/audit_pr236_topology_semantics.py | tee /tmp/topology_audit.log
+          grep -q "ANM ACCEPTED" /tmp/topology_audit.log
+      - name: Confirm PairForce angular terms and PairEnergy dynamic column header
+        run: |
+          python3 test/DNANM/audit_pr236_pair_observables.py --binary build/bin/oxDNA --output /tmp/pairs.json --pairenergy
+          python3 - <<'PY'
+          import json, math
+          obs=json.load(open("/tmp/pairs.json"))
+          assert obs["header_columns"] == obs["data_columns"], obs["header"]
+          bead0=obs["pair_0_1"]["0"]
+          # An independently rebuilt reference was obtained on original
+          # Erik source by changing only the PairForce argument ordering.
+          target=[-62.453, 56.7897, -2.01949, 1.23867, 3.89652, -47.714]
+          for i, (a,b) in enumerate(zip(bead0,target)):
+              assert abs(a-b)<0.08, (i,a,b)
+          print("PASS: corrected PairForce and PairEnergy")
+          PY
+      - name: Run full upstream quick regression
+        run: cmake --build build --target test_quick -j2

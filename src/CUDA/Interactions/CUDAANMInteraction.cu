@@ -166,7 +166,7 @@ void CUDAANMInteraction<CPUInteraction>::_init_arrays(int N) {
 	CUDA_SAFE_CALL(cudaMemcpy(_d_species, h_species.data(), sizeof(int) * N, cudaMemcpyHostToDevice));
 
 	// this object is not the one whose read_topology is called by the backend, so it parses the parameter file itself
-	this->_anm.parse_parameter_file(N);
+	this->_anm.parse_parameter_file(particles);
 	const auto &springs = this->_anm.springs();
 
 	// each spring is stored twice, once for each of its particles, sorted by the index of the other particle

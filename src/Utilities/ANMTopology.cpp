@@ -53,10 +53,13 @@ Topology read_new(const std::string &filename, const std::string &nucleic_type) 
 				throw oxDNAException("topology file, strand %d (line %d): this interaction only supports type=peptide and type=%s strands, found type=%s", ns, ns + 2, nucleic_type.c_str(), type.c_str());
 			}
 			strand.kind = (nucleic_type == "NA") ? type[0] : nucleic_type[0];
-			top.N_nucleotides += strand.sequence.size();
+			// Match the standard DNAInteraction parser: numeric '(ID)' is
+			// a single nucleotide even when its notation has many chars.
+			strand.nucleic_btypes = Utils::btypes_from_sequence(strand.sequence);
+			top.N_nucleotides += strand.nucleic_btypes.size();
 			top.N_nucleic_strands++;
 		}
-		top.kinds.insert(top.kinds.end(), strand.sequence.size(), strand.kind);
+		top.kinds.insert(top.kinds.end(), strand.peptide ? strand.sequence.size() : strand.nucleic_btypes.size(), strand.kind);
 
 		top.strands.push_back(strand);
 		ns++;
@@ -188,12 +191,12 @@ void fill_particles_new(const Topology &top, std::vector<BaseParticle *> &partic
 	int peptide_id = top.N_nucleic_strands;
 	for(uint ns = 0; ns < top.strands.size(); ns++) {
 		const Strand &strand = top.strands[ns];
-		int N_in_strand = strand.sequence.size();
+		int N_in_strand = strand.peptide ? (int) strand.sequence.size() : (int) strand.nucleic_btypes.size();
 		int first = idx;
 
 		for(int i = 0; i < N_in_strand; i++, idx++) {
 			BaseParticle *p = particles[idx];
-			char c = strand.sequence[i];
+			char c = strand.peptide ? strand.sequence[i] : '\0';
 			bool is_anm = dynamic_cast<ANMParticle *>(p) != nullptr;
 			p->n3 = p->n5 = P_VIRTUAL;
 
@@ -211,10 +214,8 @@ void fill_particles_new(const Topology &top, std::vector<BaseParticle *> &partic
 				if(is_anm) {
 					throw oxDNAException(INTERLEAVED_ERROR);
 				}
-				p->type = p->btype = Utils::decode_base(c);
-				if(p->type == P_INVALID) {
-					throw oxDNAException("topology file, strand %d (line %d): invalid base '%c'", ns, ns + 2, c);
-				}
+				p->btype = strand.nucleic_btypes[i];
+				p->type = (p->btype < 0) ? 3 - ((3 - p->btype) % 4) : p->btype % 4;
 				p->strand_id = nucleic_id;
 
 				// same connectivity as DNAInteraction::read_topology for new-style topologies

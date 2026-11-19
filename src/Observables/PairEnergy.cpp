@@ -42,7 +42,15 @@ std::string PairEnergy::get_output_string(llint curr_step) {
 
 	if(_print_header) {
 		if((int) split_energies.size() == 7) output_str << "#id1 id2 FENE BEXC STCK NEXC HB CRSTCK CXSTCK total, t = " << curr_step << "\n";
-		else output_str << "#id1 id2 FENE BEXC STCK NEXC HB CRSTCK CXSTCK DH total, t = " << curr_step << "\n";
+		else if((int) split_energies.size() == 8) output_str << "#id1 id2 FENE BEXC STCK NEXC HB CRSTCK CXSTCK DH total, t = " << curr_step << "\n";
+		else {
+			// A non-DNA interaction can expose more terms, so the fixed
+			// DNA-only header would assign incorrect labels to the data.
+			// Preserve historic 7/8-term DNA headers for compatibility.
+			output_str << "#id1 id2";
+			for(const auto &item : split_energies) output_str << " term_" << item.first;
+			output_str << " total, t = " << curr_step << "\n";
+		}
 	}
 
 	for(typename std::map<int, number>::iterator l = split_energies.begin(); l != split_energies.end(); l++)

@@ -24,6 +24,7 @@ struct Strand {
 	char kind = 'P'; // 'P' (peptide), 'D' (DNA) or 'R' (RNA)
 	bool circular = false;
 	std::string sequence;
+	std::vector<int> nucleic_btypes; // decoded bases: '(12)' is one nucleotide
 };
 
 /// one particle line of an old-style topology

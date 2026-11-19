@@ -121,8 +121,11 @@ number ANMHybridInteraction<NucleicInteraction>::pair_interaction_bonded(BasePar
 
 	number energy = _anm.spring(p, q, this->_computed_r, update_forces);
 	energy += _anm.excluded_volume(p, q, this->_computed_r, update_forces);
-	if(_anm.torsion() && q->index - p->index == 1) {
-		energy += _anm.angular(p, q, this->_computed_r, update_forces);
+	if(_anm.torsion() && std::abs(q->index - p->index) == 1 && p->strand_id == q->strand_id) {
+		// ANMModel::angular requires the smaller index first. PairForce and
+		// user-facing APIs can call pair_interaction with reversed endpoints.
+		if(p->index < q->index) energy += _anm.angular(p, q, this->_computed_r, update_forces);
+		else energy += _anm.angular(q, p, -this->_computed_r, update_forces);
 	}
 	return energy;
 }
@@ -211,7 +214,7 @@ number ANMHybridInteraction<NucleicInteraction>::_term_protein_nucleotide_exclud
 
 template<class NucleicInteraction>
 number ANMHybridInteraction<NucleicInteraction>::_term_angular(BaseParticle *p, BaseParticle *q, bool compute_r, bool update_forces) {
-	if(!_is_protein(p) || !_is_protein(q) || !p->is_bonded(q) || std::abs(q->index - p->index) != 1) {
+	if(!_is_protein(p) || !_is_protein(q) || !p->is_bonded(q) || std::abs(q->index - p->index) != 1 || p->strand_id != q->strand_id) {
 		return (number) 0.f;
 	}
 	if(compute_r) {
