@@ -69,6 +69,7 @@ log_file = {wd / 'log.dat'}
 energy_file = {wd / 'energy.dat'}
 print_conf_interval = 1000
 print_energy_every = 1
+time_scale = linear
 refresh_vel = 1
 seed = 1
 restart_step_counter = 1
