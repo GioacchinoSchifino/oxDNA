@@ -15,3 +15,25 @@ jobs:
           cmake --build build -j2
       - name: Run differential energy diagnostic
         run: python3 test/DNANM/audit_pr236_angular_energy.py --binary build/bin/oxDNA
+
+
+      - name: Probe PairEnergy columns in original code
+        continue-on-error: true
+        run: python3 test/DNANM/audit_pr236_pair_observables.py --binary build/bin/oxDNA --output /tmp/pr236_pairenergy.json --pairenergy
+      - name: Measure original PairForce
+        run: python3 test/DNANM/audit_pr236_pair_observables.py --binary build/bin/oxDNA --output /tmp/pr236_pairforce_before.json
+      - name: Patch only PairForce argument ordering in CI workspace and rebuild
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path("src/Observables/PairForce.cpp")
+          before=p.read_text()
+          old="pair_interaction(q, p, true, true)"
+          assert before.count(old)==1
+          p.write_text(before.replace(old,"pair_interaction(p, q, true, true)"))
+          PY
+          cmake --build build -j2
+      - name: Measure corrected PairForce
+        run: python3 test/DNANM/audit_pr236_pair_observables.py --binary build/bin/oxDNA --output /tmp/pr236_pairforce_after.json
+      - name: Compare original and corrected PairForce
+        run: python3 test/DNANM/audit_pr236_pair_observables.py --compare /tmp/pr236_pairforce_before.json /tmp/pr236_pairforce_after.json
