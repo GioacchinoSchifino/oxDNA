@@ -105,6 +105,12 @@ CUDAANMInteraction<CPUInteraction>::~CUDAANMInteraction() {
 template<class CPUInteraction>
 void CUDAANMInteraction<CPUInteraction>::get_settings(input_file &inp) {
 	CPUInteraction::get_settings(inp);
+    // Fail closed until the new shared CUDA_ANM kernels implement screened
+    // protein electrostatics. Never silently run an ES-OFF GPU Hamiltonian.
+    bool protein_es = false;
+    getInputBool(&inp, "protein_electrostatics", &protein_es, 0);
+    if(protein_es)
+        throw oxDNAException("protein_electrostatics is CPU-only on ANM refactor #236; CUDA ES-ON is not implemented");
 
 	int sort_every = 0;
 	getInputInt(&inp, "CUDA_sort_every", &sort_every, 0);

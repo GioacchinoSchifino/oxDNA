@@ -278,3 +278,64 @@ OxDNA provides a plugin infrastructure to make it easier to develop new observab
 * `[plugin_observable_entry_points]`: colon-separated names that will be used as entry points for observable plugins. Defaults to `make:make_observable`.
 * `[plugin_interaction_entry_points]`: colon-separated names that will be used as entry points for interaction plugins. Defaults to `make:make_interaction`.
 * `[plugin_move_entry_points]`: colon-separated names that will be used as entry points for Monte Carlo move plugins. Defaults to `make:make_move`.
+
+
+### Screened protein electrostatics for DNANM/DNACT (CPU first)
+
+The optional CPU extension adds Debye-Hückel-type protein–DNA (at the nucleotide backbone site)
+and protein–protein (at the protein bead centre) interactions. All additional forces and terms are
+**disabled by default**. It is not currently implemented for RNANM/NANM or CUDA.
+
+```ini
+interaction_type = DNANM
+backend = CPU
+protein_electrostatics = true
+protein_charge_file = protein_charges.dat
+exclude_intragroup_electrostatics = true
+# optional, positive unless specified nonnegative:
+protein_charge_scale = 1.0
+protein_dna_dh_scale = 1.0
+protein_protein_dh_scale = 1.0
+dna_effective_charge_e = 0.815
+```
+
+The single `protein_electrostatics` switch enables both protein–DNA and
+protein–protein electrostatics. The prior split switches are rejected.
+The exclusion of electrostatics **within the same group** is enabled by default;
+ANM spring-bonded protein pairs are always excluded. The default oxDNA2 screening
+parameters, salt concentration, nucleotide half-charged ends and smoothing are reused.
+
+Charge file format version 1 (one row per protein bead in protein-local order):
+```text
+# DNANM_ES_CHARGES 1
+# index_space = protein_local
+# index_base = 0
+# n_protein_beads = 2
+# n_groups = 2
+0 -1 K 1.0 0
+1 -2 E -1.0 1
+```
+
+Columns: `protein_local_index topology_strand residue charge_e group_id`.
+For **legacy** topologies, `topology_strand` is the original negative protein strand ID.
+For **new-style** topologies, it is -1 for the first peptide strand, -2 for the
+second peptide strand, and so on, regardless of the order of DNA strands.
+Values must be finite; residue letters, strand IDs, bead counts and indices
+must match the topology. Charges are **user-specified nominal net charges**:
+this does not predict protonation, histidine tautomers, terminal charges, or pKa.
+The older OAT generator PR #1 supports legacy topologies only; it should not be
+used for new topologies without adaptation and verification.
+
+The effective charge normalisation follows the earlier CPU contribution:
+`q_protein_reduced = protein_charge_scale * charge_e / dna_effective_charge_e`.
+The oxDNA2 Debye-Hückel prefactor is reused, together with factors
+`-protein_dna_dh_scale * q_protein_reduced` for protein–DNA and
+`protein_protein_dh_scale * q_i_reduced * q_j_reduced` for protein–protein.
+DNA2 backbone-end halving is respected. The cutoff used by the neighbour list
+is enlarged to include the offset of the DNA backbone interaction site.
+
+**Validation status:** this branch is a CPU-first integration candidate on Erik's
+#236 commit `41419bce`. It is not a validated merge proposal until its
+build, ES-OFF regression, force/torque finite differences, ES-ON dynamics,
+and CUDA fail-closed tests have actually passed. CUDA ES-ON must not be inferred
+from a successful CUDA build.
