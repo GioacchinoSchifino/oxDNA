@@ -549,3 +549,14 @@ decimate(align_output, decimate_output, ncpus=5, start=200, stride=10)
     
 .. autofunction:: oxDNA_analysis_tools.superimpose.superimpose
 ```
+
+## Protein charge-file generator
+
+The `oxDNA_analysis_tools.protein_charges` module exports
+`read_protein_topology(topology)`, `protein_charges(topology, output,
+pqr=None, his_charge=0, termini=False, group_by='strand', group_file=None,
+pqr_chain_order=None)`, `pqr_charges` and `assign_groups`.
+New-style `type=peptide` topology identifiers are converted to -1, -2,
+... in peptide order, matching the screened ANM C++ charge reader.
+Use explicit PQR chain mapping for homomeric proteins with ambiguous
+identical sequences.

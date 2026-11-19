@@ -309,3 +309,21 @@ For nucleic acid structures converted to all-atom formats using `oxDNA_PDB`, it 
     :func: cli_parser
     :prog: oat superimpose
 ```
+
+### `oat protein_charges`
+
+Generate the version-1 `protein_charge_file` for optional CPU screened
+protein electrostatics in DNANM/DNACT. Supports old and new `5->3`
+`type=peptide` topologies:
+
+```bash
+oat protein_charges system.top protein_charges.dat
+oat protein_charges system.top protein_charges.dat --his-charge 1
+oat protein_charges system.top protein_charges.dat --pqr prot.pqr --pqr-chain-order A,B
+oat protein_charges system.top protein_charges.dat --group-file groups.txt -q
+```
+
+`--pqr-chain-order` maps peptide strands in topology order to PQR chain
+IDs; required when homomeric sequences make chain assignment ambiguous.
+This tool generates *user-assigned nominal charges*, not validated protein
+protonation states. Check residues, chain maps, termini, and model choices.
