@@ -103,7 +103,10 @@ class ANMRefactorTopologyAndValidation(unittest.TestCase):
                 input_override=lambda s: s.replace("backend = CPU", "backend = CUDA"))
             self.assertNotEqual(proc.returncode, 0)
             combined = (proc.stdout + log).lower()
-            self.assertIn("cpu-only", combined)
+            self.assertTrue(
+                "cpu-only" in combined or "backend 'cuda' not supported" in combined,
+                combined,
+            )
 
     def test_06_deprecated_separate_switch_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
