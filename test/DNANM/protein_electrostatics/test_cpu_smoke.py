@@ -81,7 +81,7 @@ exclude_intragroup_electrostatics = false
         (wd / "input").write_text(text)
         p = subprocess.run([str(binary), "input"], cwd=wd, capture_output=True, text=True, timeout=120)
         if p.returncode:
-            raise RuntimeError(f"oxDNA failed: {interaction} {top.name} ES={enabled}: {p.stderr[-2200:]} {p.stdout[-1000:]}")
+            raise RuntimeError(f"oxDNA failed: {interaction} {top.name} ES={enabled}: exit={p.returncode} LOG={(wd / 'log.dat').read_text()[-3200:] if (wd / 'log.dat').exists() else '<no log>'} STDERR={p.stderr[-2200:]} STDOUT={p.stdout[-1000:]}")
         # A run must create a finite energy trace.
         path = wd / "energy.dat"
         if not path.exists() or not path.stat().st_size:
