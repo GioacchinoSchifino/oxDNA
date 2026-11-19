@@ -637,19 +637,10 @@ def run_case(
         )
     )
 
-    parfile = "none"
-
-    if bond_par is not None:
-        parfile = "anm.par"
-
-        (case / "anm.par").write_text(
-            bond_par
-        )
-    elif interaction_type == "DNACT":
-        # Explicit no-spring file preserves the former none fixture mechanics.
-        parfile = "anm.par"
-        n_protein = int(TOP.splitlines()[0].split()[3])
-        (case / "anm.par").write_text(f"{n_protein}\n")
+    # Since Erik's refactor, ANM topologies containing proteins require an
+    # explicit parameter file, even if the fixture has zero ANM springs.
+    parfile = "anm.par"
+    (case / "anm.par").write_text("3\n" if bond_par is None else bond_par)
 
     (case / "input").write_text(
         input_text(

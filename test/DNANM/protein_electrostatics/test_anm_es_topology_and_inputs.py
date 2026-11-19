@@ -42,8 +42,10 @@ class ANMRefactorTopologyAndValidation(unittest.TestCase):
         if charges is None:
             charges = physics.charges_text((1., 0., 0.))
         (case / "protein_charges.dat").write_text(charges)
+        (case / "anm.par").write_text("3\n")
         inp = physics.input_text("DNANM", True, False,
-                                  (0, 3) if protein_first else (0, 1))
+                                  (0, 3) if protein_first else (0, 1),
+                                  parfile="anm.par")
         if input_override:
             inp = input_override(inp)
         (case / "input").write_text(inp)
