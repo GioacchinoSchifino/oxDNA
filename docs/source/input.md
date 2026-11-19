@@ -226,6 +226,85 @@ Nucleotides interact with the corresponding nucleic acid interaction, whose opti
 
 On GPUs (`backend = CUDA`), `DNANM`, `DNACT`, `RNANM`, `RNACT`, `NANM` and `NACT` are supported (`AC` and `ACT` are not: use `DNANM`/`DNACT` with a protein-only topology, which is equivalent).
 
+### Optional screened protein electrostatics (CPU-only, DNANM/DNACT)
+
+This opt-in extension adds screened protein–DNA-backbone and protein–protein
+interactions to the existing oxDNA2 + ANM/ANMT Hamiltonian. It is **off by
+default**; the ANM springs, excluded volume, nucleotide interactions and
+torsions are not replaced. The extension is currently supported on
+**CPU only**. Setting \`backend = CUDA\` together with
+\`protein_electrostatics = true\` fails explicitly rather than omitting the
+additional forces. RNA/NA variants are not included in this contribution.
+
+* \`[protein_electrostatics = <bool>]\`: single switch for both protein–DNA and
+  protein–protein terms, default \`false\`. Old separate switches
+  \`protein_dna_electrostatics\` and \`protein_protein_electrostatics\` are
+  rejected; convert old input files explicitly.
+* \`protein_charge_file = <path>\`: required when enabled. One effective charge
+  in elementary-charge units per protein bead. The format is described below.
+* \`[exclude_intragroup_electrostatics = <bool>]\`: default \`true\`. Excludes
+  protein–protein electrostatic pairs assigned the same group. All ANM-bonded
+  protein pairs are excluded regardless of this option. Use groups consistent
+  with the intended model of intra- versus inter-subunit interactions.
+* \`[protein_charge_scale = <number>]\`: multiplier for protein charges;
+  default 1, must be finite and non-negative.
+* \`[protein_dna_dh_scale = <number>]\`,
+  \`[protein_protein_dh_scale = <number>]\`: separate non-negative
+  multiplicative strengths; both default to 1. These are **not** separate
+  enable/disable switches.
+* \`[dna_effective_charge_e = <number>]\`: oxDNA2 backbone charge
+  normalisation reference; default 0.815, strictly positive.
+
+For screening, the extension uses the **DNA2** Debye–Hückel length, strength,
+and smoothly truncated cutoff (including salt/temperature dependence).
+Protein charges are reduced by \`protein_charge_scale / dna_effective_charge_e\`.
+A DNA backbone site contributes a negative factor, with the standard
+\`dh_half_charged_ends\` rule for terminal nucleotides. Protein beads are
+point charges at their centres; the DNA charge acts at the backbone interaction
+centre and consequently exerts a torque on the nucleotide. The model is
+phenomenological: assigning an elementary residue charge is not a substitute
+for selecting physically appropriate protonation states or validating the
+coarse-grained electrostatic potential.
+
+Version-1 charge file example for two protein beads on the **first peptide
+strand** (replace the residue identities and charges with those matching your
+topology):
+
+~~~text
+# DNANM_ES_CHARGES 1
+# index_space = protein_local
+# index_base = 0
+# n_protein_beads = 2
+# n_groups = 1
+# charge_model = example
+# columns = protein_index topology_strand residue charge_e group_id
+0 -1 K 1.0 0
+1 -1 E -1.0 0
+~~~
+
+Rows are zero-based **protein-local** indices, in topology order, independent
+of the ordering of DNA and protein blocks. For **legacy** mixed topologies,
+\`topology_strand\` is the negative strand identifier appearing in the topology.
+For **new-style** topologies (\`type=peptide\`), it is the negative ordinal of
+that peptide strand among *peptide* strands: -1, -2, etc. The parser validates
+the number of beads, index uniqueness, residue codes, strand labels, charge
+finiteness, and group IDs. Legacy three-column \`index charge group\` files
+remain readable with a warning but lack residue/strand verification.
+
+Example input addition:
+
+~~~text
+interaction_type = DNANM
+backend = CPU
+protein_electrostatics = true
+protein_charge_file = charges.txt
+exclude_intragroup_electrostatics = true
+~~~
+
+**Validation scope:** CPU first. CUDA ES-ON, long-time trajectories,
+NPT/MC, and wider protonation models require separate tests before claiming
+production readiness.
+
 ## Options for `LJ` (Lennard-Jones) simulations
 
 * `[LJ_rcut = <float>]`: interaction cut-off. Defaults to 2.5.
