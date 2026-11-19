@@ -47,7 +47,15 @@ def run_one(binary, top, interaction, enabled, alternating):
         wd = Path(td)
         charges = wd / "charges.dat"
         write_charges(top, charges, alternating)
-        par = DATA / ("kdpg_act.par" if interaction == "DNACT" else "kdpg_anm.par")
+        hybrid = top.name in ("acc2.top", "cage_new.top")
+        if hybrid:
+            par = REPO / "examples" / "DNANM" / "hybrid_cage" / "ac.par"
+            conf = (REPO / "test" / "DNANM" / "new_topology" / "hybrid_cage" / "cage_new.dat"
+                    if top.name == "cage_new.top" else
+                    REPO / "examples" / "DNANM" / "hybrid_cage" / "acc2_relaxed.dat")
+        else:
+            par = DATA / ("kdpg_act.par" if interaction == "DNACT" else "kdpg_anm.par")
+            conf = DATA / "s1.dat"
         text = f"""backend = CPU
 backend_precision = double
 interaction_type = {interaction}
@@ -62,7 +70,7 @@ diff_coeff = 2.5
 newtonian_steps = 103
 parfile = {par}
 topology = {top}
-conf_file = {DATA / 's1.dat'}
+conf_file = {conf}
 trajectory_file = {wd / 'trajectory.dat'}
 lastconf_file = {wd / 'lastconf.dat'}
 log_file = {wd / 'log.dat'}
@@ -105,6 +113,13 @@ def main():
             charged = run_one(binary, top, interaction, True, True)
             assert baseline == zero, f"Zero-charge regression on {top}, {interaction}: {baseline} vs {zero}"
             print(f"PASS {top.name} {interaction}: ES-OFF == ES-ON-zero; charged finite {charged}")
+    for top in [REPO / "examples" / "DNANM" / "hybrid_cage" / "acc2.top",
+                REPO / "test" / "DNANM" / "new_topology" / "hybrid_cage" / "cage_new.top"]:
+        baseline = run_one(binary, top, "DNANM", False, False)
+        zero = run_one(binary, top, "DNANM", True, False)
+        charged = run_one(binary, top, "DNANM", True, True)
+        assert baseline == zero, f"Hybrid-cage ES-OFF regression on {top}"
+        print(f"PASS {top.name} DNANM DNA/protein hybrid: zero-charge parity, ES-ON finite {charged}")
     print("CPU SMOKE PASS (not full physics validation)")
 
 if __name__ == "__main__": main()
