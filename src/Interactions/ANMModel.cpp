@@ -13,6 +13,9 @@
 #include "../model.h"
 
 #include <algorithm>
+#include <cctype>
+#include <cmath>
+#include <stdexcept>
 #include <fstream>
 #include <sstream>
 
@@ -212,7 +215,22 @@ void ANMModel::_parse_parameter_file(int N_particles, const std::function<void(i
 		std::string token;
 		while(ss >> token) {
 			try {
-				extras.push_back(std::stod(token));
+				// std::stod by default accepts a numeric prefix ("0.5junk")
+				// and special values ("nan", "inf"). Require a full finite
+				// decimal token independently of build flags like -ffast-math.
+				bool decimal_token = !token.empty();
+				for(unsigned char c : token) {
+					if(!std::isdigit(c) && c != '+' && c != '-' && c != '.' && c != 'e' && c != 'E') {
+						decimal_token = false;
+						break;
+					}
+				}
+				if(!decimal_token) throw std::invalid_argument("not a decimal token");
+				size_t consumed = 0;
+				double value = std::stod(token, &consumed);
+				if(consumed != token.size() || !std::isfinite(value))
+					throw std::invalid_argument("not a complete finite decimal");
+				extras.push_back(value);
 			}
 			catch(std::exception &e) {
 				throw oxDNAException("Parameter file, line %d: invalid value '%s'", line_number, token.c_str());

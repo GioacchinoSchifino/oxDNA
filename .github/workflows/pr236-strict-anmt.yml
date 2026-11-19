@@ -1,0 +1,28 @@
+name: ANMT strict parameter validation regression
+
+on:
+  push:
+    branches:
+      - fix/pr236-anmt-input-validation-20261119
+  workflow_dispatch:
+
+jobs:
+  cpu:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build CPU
+        run: |
+          cmake -S . -B build -DCUDA=OFF
+          cmake --build build -j2
+      - name: Reject nonfinite and malformed ANMT cosines
+        run: |
+          python3 test/DNANM/audit_pr236_parameter_validation.py | tee /tmp/anm_invalid.log
+          grep -q "INVALID_REJECTED NONFINITE_COSINE" /tmp/anm_invalid.log
+          grep -q "INVALID_REJECTED COSINE_TRAILING_GARBAGE" /tmp/anm_invalid.log
+          if grep -q "CONFIRMED_INVALID_ACCEPTED" /tmp/anm_invalid.log; then
+            echo "Input validation did not fail closed" >&2
+            exit 1
+          fi
+      - name: Upstream quick regression
+        run: cmake --build build --target test_quick -j2
