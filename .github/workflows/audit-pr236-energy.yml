@@ -1,0 +1,17 @@
+name: Audit PR236 angular energy observables
+on:
+  push:
+    branches:
+      - audit/erik-pr236-angular-energy-20261119
+  workflow_dispatch:
+jobs:
+  reproduce:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build unmodified Erik #236 CPU code
+        run: |
+          cmake -S . -B build -DCUDA=OFF
+          cmake --build build -j2
+      - name: Run differential energy diagnostic
+        run: python3 test/DNANM/audit_pr236_angular_energy.py --binary build/bin/oxDNA
