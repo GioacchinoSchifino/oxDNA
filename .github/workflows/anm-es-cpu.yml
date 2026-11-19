@@ -14,7 +14,7 @@ jobs:
         run: |
           cmake -S . -B build -DCUDA=OFF
           cmake --build build -j2
-      - name: CPU ES smoke: legacy and new topology
+      - name: "CPU ES smoke: legacy and new topology"
         run: python3 test/DNANM/protein_electrostatics/test_cpu_smoke.py --binary build/bin/oxDNA
       - name: Upstream quick regression
         run: cmake --build build --target test_quick -j2
