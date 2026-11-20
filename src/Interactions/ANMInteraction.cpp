@@ -68,8 +68,11 @@ number ANMInteraction::pair_interaction_bonded(BaseParticle *p, BaseParticle *q,
 
 	number energy = _anm.spring(p, q, _computed_r, update_forces);
 	energy += _anm.excluded_volume(p, q, _computed_r, update_forces);
-	if(_anm.torsion() && q->index - p->index == 1) {
-		energy += _anm.angular(p, q, _computed_r, update_forces);
+	if(_anm.torsion() && std::abs(q->index - p->index) == 1 && p->strand_id == q->strand_id) {
+		// Angular parameters are keyed by the lower particle index. Observables
+		// may call bonded interactions with the endpoints in reverse order.
+		if(p->index < q->index) energy += _anm.angular(p, q, _computed_r, update_forces);
+		else energy += _anm.angular(q, p, -_computed_r, update_forces);
 	}
 	return energy;
 }
@@ -99,7 +102,7 @@ number ANMInteraction::_exc_volume(BaseParticle *p, BaseParticle *q, bool comput
 }
 
 number ANMInteraction::_angular(BaseParticle *p, BaseParticle *q, bool compute_r, bool update_forces) {
-	if(!p->is_bonded(q) || std::abs(q->index - p->index) != 1) {
+	if(!p->is_bonded(q) || std::abs(q->index - p->index) != 1 || p->strand_id != q->strand_id) {
 		return (number) 0.f;
 	}
 	// the angular potential is defined for the pair (i, i + 1)

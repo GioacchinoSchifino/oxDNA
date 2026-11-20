@@ -138,7 +138,7 @@ void ANMModel::read_parameter_file(std::vector<BaseParticle *> &particles, int N
 		return;
 	}
 
-	_parse_parameter_file(particles.size(), [&particles](int key1, int key2) {
+	_parse_parameter_file(particles, [&particles](int key1, int key2) {
 		auto *q = dynamic_cast<ANMParticle *>(particles[key1]);
 		if(q == nullptr || dynamic_cast<ANMParticle *>(particles[key2]) == nullptr) {
 			throw oxDNAException("The parameter file contains a spring between particles %d and %d, but only amino acids can be connected by springs", key1, key2);
@@ -164,13 +164,15 @@ void ANMModel::unlink_unbonded_neighbours(std::vector<BaseParticle *> &particles
 	}
 }
 
-void ANMModel::parse_parameter_file(int N_particles) {
+void ANMModel::parse_parameter_file(const std::vector<BaseParticle *> &particles) {
 	if(!_parameter_file.empty()) {
-		_parse_parameter_file(N_particles, [](int, int) {});
+		_parse_parameter_file(particles, [](int, int) {});
 	}
 }
 
-void ANMModel::_parse_parameter_file(int N_particles, const std::function<void(int, int)> &on_spring) {
+void ANMModel::_parse_parameter_file(const std::vector<BaseParticle *> &particles, const std::function<void(int, int)> &on_spring) {
+	// Consecutive global indices can belong to different peptide chains.
+	const int N_particles = (int) particles.size();
 	_springs.clear();
 	_angular.clear();
 
@@ -236,7 +238,7 @@ void ANMModel::_parse_parameter_file(int N_particles, const std::function<void(i
 			throw oxDNAException("Parameter file, line %d: the spring %d-%d is listed more than once", line_number, key1, key2);
 		}
 
-		bool backbone = (key2 - key1 == 1);
+		bool backbone = (key2 - key1 == 1 && particles[key1]->strand_id == particles[key2]->strand_id);
 		if(!_torsion) {
 			if(!extras.empty()) {
 				throw oxDNAException("Parameter file, line %d: found %d columns instead of 5. Bending and torsion parameters are only used by the ANMT interactions (%s): use one of them, or remove the extra columns", line_number, (int) extras.size() + 5, ANMT_NAMES);
