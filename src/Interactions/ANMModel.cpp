@@ -13,6 +13,7 @@
 #include "../model.h"
 
 #include <algorithm>
+#include <cmath>
 #include <fstream>
 #include <sstream>
 
@@ -69,6 +70,9 @@ void ANMModel::get_settings(input_file &inp, bool parfile_required) {
 		getInputFloat(&inp, "torsion_k", &kt_tmp, 0);
 		_k_bend = (number) kb_tmp;
 		_k_tor = (number) kt_tmp;
+		if(!std::isfinite((double) _k_bend) || !std::isfinite((double) _k_tor)) {
+			throw oxDNAException("Bending and torsion stiffnesses must be finite");
+		}
 
 		if((_k_bend < 0 && _k_tor >= 0) || (_k_tor < 0 && _k_bend >= 0)) {
 			throw oxDNAException("Bending & Torsion Constants Must BOTH be set globally or in parameter file");
@@ -214,9 +218,16 @@ void ANMModel::_parse_parameter_file(const std::vector<BaseParticle *> &particle
 		std::string token;
 		while(ss >> token) {
 			try {
-				extras.push_back(std::stod(token));
+				// stod accepts prefixes (e.g. '0.5junk') and non-finite values.
+				// Require the entire token to represent a finite number.
+				std::size_t consumed = 0;
+				double value = std::stod(token, &consumed);
+				if(consumed != token.size() || !std::isfinite(value)) {
+					throw std::invalid_argument("not a complete finite number");
+				}
+				extras.push_back(value);
 			}
-			catch(std::exception &e) {
+			catch(const std::exception &e) {
 				throw oxDNAException("Parameter file, line %d: invalid value '%s'", line_number, token.c_str());
 			}
 		}
@@ -224,9 +235,9 @@ void ANMModel::_parse_parameter_file(const std::vector<BaseParticle *> &particle
 		if(key1 < 0 || key1 >= N_particles) throw oxDNAException("Parameter file, line %d: invalid particle index %d (there are %d particles)", line_number, key1, N_particles);
 		if(key2 < 0 || key2 >= N_particles) throw oxDNAException("Parameter file, line %d: invalid particle index %d (there are %d particles)", line_number, key2, N_particles);
 		if(key1 == key2) throw oxDNAException("Parameter file, line %d: a particle cannot be connected to itself", line_number);
-		if(dist < 0) throw oxDNAException("Parameter file, line %d: invalid equilibrium distance %lf", line_number, dist);
+		if(!std::isfinite(dist) || dist < 0) throw oxDNAException("Parameter file, line %d: invalid equilibrium distance %lf", line_number, dist);
 		if(potswitch != "s") throw oxDNAException("Parameter file, line %d: potential type '%s' not supported (only 's', harmonic springs, is)", line_number, potswitch.c_str());
-		if(potential < 0) throw oxDNAException("Parameter file, line %d: invalid spring constant %lf", line_number, potential);
+		if(!std::isfinite(potential) || potential < 0) throw oxDNAException("Parameter file, line %d: invalid spring constant %lf", line_number, potential);
 		if(key1 > key2) {
 			if(!extras.empty()) {
 				throw oxDNAException("Parameter file, line %d: the bending/torsion parameters of the pair %d-%d should be on a line that starts with %d %d", line_number, key2, key1, key2, key1);
