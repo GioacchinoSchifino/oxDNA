@@ -20,6 +20,9 @@ jobs:
           python3 test/DNANM/audit_pr236_pair_observables.py --binary build/bin/oxDNA --output /tmp/pr236_pair.json --pairenergy
           python3 test/DNANM/audit_pr236_topology_semantics.py
           python3 test/DNANM/audit_pr236_parameter_validation.py
+      - name: Report independent ANM pressure discrepancy (diagnostic only)
+        run: |
+          python3 test/DNANM/audit_pr236_pressure.py --binary build/bin/oxDNA
       - name: Quick original regression tests
         run: |
           set -euo pipefail
