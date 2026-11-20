@@ -1,0 +1,26 @@
+name: Internal ANM PR236 CPU validation
+on:
+  push:
+    branches:
+      - validation/pr236-cpu-20261120
+jobs:
+  focused_cpu:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build CPU
+        run: |
+          cmake -S . -B build -DCUDA=OFF
+          cmake --build build -j2
+      - name: Assert ANM invariants
+        run: |
+          set -euo pipefail
+          python3 test/DNANM/audit_pr236_angular_energy.py --binary build/bin/oxDNA
+          python3 test/DNANM/audit_pr236_pair_observables.py --binary build/bin/oxDNA --output /tmp/pr236_pair.json --pairenergy
+          python3 test/DNANM/audit_pr236_topology_semantics.py
+          python3 test/DNANM/audit_pr236_parameter_validation.py
+      - name: Quick original regression tests
+        run: |
+          set -euo pipefail
+          cmake --build build --target test_run test_quick -j2
