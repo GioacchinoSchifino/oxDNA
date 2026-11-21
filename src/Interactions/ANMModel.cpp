@@ -14,9 +14,51 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 #include <fstream>
 #include <sstream>
+
+
+namespace {
+
+// Read a complete finite DECIMAL number. A syntactic gate is necessary here:
+// -ffast-math permits the compiler to assume that NaN/Inf do not exist, so
+// std::isfinite() may incorrectly return true on a NaN loaded by std::stod().
+double parse_finite_decimal_token(const std::string &token) {
+	std::size_t pos = 0;
+	if(pos < token.size() && (token[pos] == '+' || token[pos] == '-')) ++pos;
+	bool has_digit = false;
+	while(pos < token.size() && token[pos] >= '0' && token[pos] <= '9') {
+		has_digit = true;
+		++pos;
+	}
+	if(pos < token.size() && token[pos] == '.') {
+		++pos;
+		while(pos < token.size() && token[pos] >= '0' && token[pos] <= '9') {
+			has_digit = true;
+			++pos;
+		}
+	}
+	if(!has_digit) throw std::invalid_argument("not a decimal number");
+	if(pos < token.size() && (token[pos] == 'e' || token[pos] == 'E')) {
+		++pos;
+		if(pos < token.size() && (token[pos] == '+' || token[pos] == '-')) ++pos;
+		const std::size_t exponent_start = pos;
+		while(pos < token.size() && token[pos] >= '0' && token[pos] <= '9') ++pos;
+		if(pos == exponent_start) throw std::invalid_argument("invalid exponent");
+	}
+	if(pos != token.size()) throw std::invalid_argument("invalid decimal token");
+	std::size_t consumed = 0;
+	const double value = std::stod(token, &consumed);
+	if(consumed != token.size()) throw std::invalid_argument("incomplete decimal token");
+	// The engine can be built with float precision. A finite double that
+	// overflows 'number' must not enter a spring/angle calculation as infinity.
+	const double maximum = (double) std::numeric_limits<number>::max();
+	if(value > maximum || value < -maximum) throw std::out_of_range("outside oxDNA number range");
+	return value;
+}
+} // namespace
 
 ANMModel::ANMModel(bool torsion) :
 				_torsion(torsion) {
@@ -65,15 +107,20 @@ void ANMModel::get_settings(input_file &inp, bool parfile_required) {
 	}
 
 	if(_torsion) {
-		float kb_tmp = -1.f;
-		float kt_tmp = -1.f;
-		getInputFloat(&inp, "bending_k", &kb_tmp, 0);
-		getInputFloat(&inp, "torsion_k", &kt_tmp, 0);
-		_k_bend = (number) kb_tmp;
-		_k_tor = (number) kt_tmp;
-		if(!std::isfinite((double) _k_bend) || !std::isfinite((double) _k_tor)) {
-			throw oxDNAException("Bending and torsion stiffnesses must be finite");
-		}
+		// Read the raw optional stiffnesses before conversion so invalid values
+		// cannot bypass the finite check under Release (-ffast-math).
+		auto read_global_stiffness = [&inp](const char *key) -> number {
+			std::string raw;
+			if(getInputString(&inp, key, raw, 0) != KEY_FOUND) return (number) -1;
+			try {
+				return (number) parse_finite_decimal_token(raw);
+			}
+			catch(const std::exception &) {
+				throw oxDNAException("Invalid %s value '%s': expected a finite decimal number", key, raw.c_str());
+			}
+		};
+		_k_bend = read_global_stiffness("bending_k");
+		_k_tor = read_global_stiffness("torsion_k");
 
 		if((_k_bend < 0 && _k_tor >= 0) || (_k_tor < 0 && _k_bend >= 0)) {
 			throw oxDNAException("Bending & Torsion Constants Must BOTH be set globally or in parameter file");
@@ -210,23 +257,23 @@ void ANMModel::_parse_parameter_file(const std::vector<BaseParticle *> &particle
 		}
 
 		int key1, key2;
-		std::string potswitch;
+		std::string potswitch, dist_token, potential_token;
 		double potential, dist;
-		if(!(ss >> key1 >> key2 >> dist >> potswitch >> potential)) {
+		if(!(ss >> key1 >> key2 >> dist_token >> potswitch >> potential_token)) {
 			throw oxDNAException("Parameter file, line %d: invalid syntax, expected '<i> <j> <r0> s <k>'", line_number);
+		}
+		try {
+			dist = parse_finite_decimal_token(dist_token);
+			potential = parse_finite_decimal_token(potential_token);
+		}
+		catch(const std::exception &) {
+			throw oxDNAException("Parameter file, line %d: expected finite decimal equilibrium distance and spring constant", line_number);
 		}
 		std::vector<double> extras;
 		std::string token;
 		while(ss >> token) {
 			try {
-				// stod accepts prefixes (e.g. '0.5junk') and non-finite values.
-				// Require the entire token to represent a finite number.
-				std::size_t consumed = 0;
-				double value = std::stod(token, &consumed);
-				if(consumed != token.size() || !std::isfinite(value)) {
-					throw std::invalid_argument("not a complete finite number");
-				}
-				extras.push_back(value);
+				extras.push_back(parse_finite_decimal_token(token));
 			}
 			catch(const std::exception &e) {
 				throw oxDNAException("Parameter file, line %d: invalid value '%s'", line_number, token.c_str());
@@ -236,9 +283,9 @@ void ANMModel::_parse_parameter_file(const std::vector<BaseParticle *> &particle
 		if(key1 < 0 || key1 >= N_particles) throw oxDNAException("Parameter file, line %d: invalid particle index %d (there are %d particles)", line_number, key1, N_particles);
 		if(key2 < 0 || key2 >= N_particles) throw oxDNAException("Parameter file, line %d: invalid particle index %d (there are %d particles)", line_number, key2, N_particles);
 		if(key1 == key2) throw oxDNAException("Parameter file, line %d: a particle cannot be connected to itself", line_number);
-		if(!std::isfinite(dist) || dist < 0) throw oxDNAException("Parameter file, line %d: invalid equilibrium distance %lf", line_number, dist);
+		if(dist < 0) throw oxDNAException("Parameter file, line %d: invalid equilibrium distance %lf", line_number, dist);
 		if(potswitch != "s") throw oxDNAException("Parameter file, line %d: potential type '%s' not supported (only 's', harmonic springs, is)", line_number, potswitch.c_str());
-		if(!std::isfinite(potential) || potential < 0) throw oxDNAException("Parameter file, line %d: invalid spring constant %lf", line_number, potential);
+		if(potential < 0) throw oxDNAException("Parameter file, line %d: invalid spring constant %lf", line_number, potential);
 		if(key1 > key2) {
 			if(!extras.empty()) {
 				throw oxDNAException("Parameter file, line %d: the bending/torsion parameters of the pair %d-%d should be on a line that starts with %d %d", line_number, key2, key1, key2, key1);
