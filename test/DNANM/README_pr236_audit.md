@@ -7,13 +7,10 @@ From the repository root:
 ```bash
 cmake -S . -B build -DCUDA=OFF
 cmake --build build -j2
-python3 test/DNANM/audit_pr236_angular_energy.py --binary build/bin/oxDNA
-python3 test/DNANM/audit_pr236_pair_observables.py --binary build/bin/oxDNA --output /tmp/pr236_pair.json --pairenergy
-python3 test/DNANM/audit_pr236_topology_semantics.py
-python3 test/DNANM/audit_pr236_parameter_validation.py
+bash test/DNANM/run_pr236_cpu_regressions.sh build/bin/oxDNA ./pr236_focused_results
 ```
 
-All four commands **exit nonzero when the tested regression is detected**. The pair-observable test also writes JSON for inspection; the optional `--compare` mode compares two independently generated snapshots. A failed subprocess or missing output also causes a failure, not a silent PASS.
+The single fail-fast runner executes all four tests and **exits nonzero if any one fails**, even with the Release `-ffast-math` compiler flag. The pair-observable test also writes JSON for inspection; the optional `--compare` mode compares two independently generated snapshots. A failed subprocess or missing output also causes a failure, not a silent PASS.
 
 What these tests cover:
 
@@ -21,6 +18,6 @@ What these tests cover:
 - **PairForce**: reversed bonded pair calls retain a nonzero angular torque.
 - **PairEnergy**: data column count matches the header for ANM systems.
 - **New topologies**: mixed DNANM accepts numeric DNA base tokens `(0)` as the standard DNA2 model does.
-- **ANMT parameter parsing**: `nan` and `0.5junk` are rejected.
+- **ANMT parameter parsing**: `nan`, `inf`, incomplete decimals, and overflow are rejected in cosine, spring and global stiffness fields, while valid exponent/signed decimals remain accepted.
 
 The CPU regressions **do not certify CUDA**. In particular, the CUDA parser change needs a CUDA build and CPU/GPU regression checks on a GPU node. Use Erik's external suite: https://github.com/ErikPoppleton/oxDNA_regression_tests. The new `CUDA_list=edge` code path also merits separate checking. The pressure/stress-tensor issue is independent and intentionally outside these fixes.
