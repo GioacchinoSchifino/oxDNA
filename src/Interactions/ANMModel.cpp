@@ -13,8 +13,52 @@
 #include "../model.h"
 
 #include <algorithm>
+#include <cmath>
+#include <limits>
+#include <stdexcept>
 #include <fstream>
 #include <sstream>
+
+
+namespace {
+
+// Read a complete finite DECIMAL number. A syntactic gate is necessary here:
+// -ffast-math permits the compiler to assume that NaN/Inf do not exist, so
+// std::isfinite() may incorrectly return true on a NaN loaded by std::stod().
+double parse_finite_decimal_token(const std::string &token) {
+	std::size_t pos = 0;
+	if(pos < token.size() && (token[pos] == '+' || token[pos] == '-')) ++pos;
+	bool has_digit = false;
+	while(pos < token.size() && token[pos] >= '0' && token[pos] <= '9') {
+		has_digit = true;
+		++pos;
+	}
+	if(pos < token.size() && token[pos] == '.') {
+		++pos;
+		while(pos < token.size() && token[pos] >= '0' && token[pos] <= '9') {
+			has_digit = true;
+			++pos;
+		}
+	}
+	if(!has_digit) throw std::invalid_argument("not a decimal number");
+	if(pos < token.size() && (token[pos] == 'e' || token[pos] == 'E')) {
+		++pos;
+		if(pos < token.size() && (token[pos] == '+' || token[pos] == '-')) ++pos;
+		const std::size_t exponent_start = pos;
+		while(pos < token.size() && token[pos] >= '0' && token[pos] <= '9') ++pos;
+		if(pos == exponent_start) throw std::invalid_argument("invalid exponent");
+	}
+	if(pos != token.size()) throw std::invalid_argument("invalid decimal token");
+	std::size_t consumed = 0;
+	const double value = std::stod(token, &consumed);
+	if(consumed != token.size()) throw std::invalid_argument("incomplete decimal token");
+	// The engine can be built with float precision. A finite double that
+	// overflows 'number' must not enter a spring/angle calculation as infinity.
+	const double maximum = (double) std::numeric_limits<number>::max();
+	if(value > maximum || value < -maximum) throw std::out_of_range("outside oxDNA number range");
+	return value;
+}
+} // namespace
 
 ANMModel::ANMModel(bool torsion) :
 				_torsion(torsion) {
@@ -63,12 +107,20 @@ void ANMModel::get_settings(input_file &inp, bool parfile_required) {
 	}
 
 	if(_torsion) {
-		float kb_tmp = -1.f;
-		float kt_tmp = -1.f;
-		getInputFloat(&inp, "bending_k", &kb_tmp, 0);
-		getInputFloat(&inp, "torsion_k", &kt_tmp, 0);
-		_k_bend = (number) kb_tmp;
-		_k_tor = (number) kt_tmp;
+		// Read the raw optional stiffnesses before conversion so invalid values
+		// cannot bypass the finite check under Release (-ffast-math).
+		auto read_global_stiffness = [&inp](const char *key) -> number {
+			std::string raw;
+			if(getInputString(&inp, key, raw, 0) != KEY_FOUND) return (number) -1;
+			try {
+				return (number) parse_finite_decimal_token(raw);
+			}
+			catch(const std::exception &) {
+				throw oxDNAException("Invalid %s value '%s': expected a finite decimal number", key, raw.c_str());
+			}
+		};
+		_k_bend = read_global_stiffness("bending_k");
+		_k_tor = read_global_stiffness("torsion_k");
 
 		if((_k_bend < 0 && _k_tor >= 0) || (_k_tor < 0 && _k_bend >= 0)) {
 			throw oxDNAException("Bending & Torsion Constants Must BOTH be set globally or in parameter file");
@@ -138,7 +190,7 @@ void ANMModel::read_parameter_file(std::vector<BaseParticle *> &particles, int N
 		return;
 	}
 
-	_parse_parameter_file(particles.size(), [&particles](int key1, int key2) {
+	_parse_parameter_file(particles, [&particles](int key1, int key2) {
 		auto *q = dynamic_cast<ANMParticle *>(particles[key1]);
 		if(q == nullptr || dynamic_cast<ANMParticle *>(particles[key2]) == nullptr) {
 			throw oxDNAException("The parameter file contains a spring between particles %d and %d, but only amino acids can be connected by springs", key1, key2);
@@ -164,13 +216,15 @@ void ANMModel::unlink_unbonded_neighbours(std::vector<BaseParticle *> &particles
 	}
 }
 
-void ANMModel::parse_parameter_file(int N_particles) {
+void ANMModel::parse_parameter_file(const std::vector<BaseParticle *> &particles) {
 	if(!_parameter_file.empty()) {
-		_parse_parameter_file(N_particles, [](int, int) {});
+		_parse_parameter_file(particles, [](int, int) {});
 	}
 }
 
-void ANMModel::_parse_parameter_file(int N_particles, const std::function<void(int, int)> &on_spring) {
+void ANMModel::_parse_parameter_file(const std::vector<BaseParticle *> &particles, const std::function<void(int, int)> &on_spring) {
+	// Consecutive global indices can belong to different peptide chains.
+	const int N_particles = (int) particles.size();
 	_springs.clear();
 	_angular.clear();
 
@@ -203,18 +257,25 @@ void ANMModel::_parse_parameter_file(int N_particles, const std::function<void(i
 		}
 
 		int key1, key2;
-		std::string potswitch;
+		std::string potswitch, dist_token, potential_token;
 		double potential, dist;
-		if(!(ss >> key1 >> key2 >> dist >> potswitch >> potential)) {
+		if(!(ss >> key1 >> key2 >> dist_token >> potswitch >> potential_token)) {
 			throw oxDNAException("Parameter file, line %d: invalid syntax, expected '<i> <j> <r0> s <k>'", line_number);
+		}
+		try {
+			dist = parse_finite_decimal_token(dist_token);
+			potential = parse_finite_decimal_token(potential_token);
+		}
+		catch(const std::exception &) {
+			throw oxDNAException("Parameter file, line %d: expected finite decimal equilibrium distance and spring constant", line_number);
 		}
 		std::vector<double> extras;
 		std::string token;
 		while(ss >> token) {
 			try {
-				extras.push_back(std::stod(token));
+				extras.push_back(parse_finite_decimal_token(token));
 			}
-			catch(std::exception &e) {
+			catch(const std::exception &e) {
 				throw oxDNAException("Parameter file, line %d: invalid value '%s'", line_number, token.c_str());
 			}
 		}
@@ -236,7 +297,7 @@ void ANMModel::_parse_parameter_file(int N_particles, const std::function<void(i
 			throw oxDNAException("Parameter file, line %d: the spring %d-%d is listed more than once", line_number, key1, key2);
 		}
 
-		bool backbone = (key2 - key1 == 1);
+		bool backbone = (key2 - key1 == 1 && particles[key1]->strand_id == particles[key2]->strand_id);
 		if(!_torsion) {
 			if(!extras.empty()) {
 				throw oxDNAException("Parameter file, line %d: found %d columns instead of 5. Bending and torsion parameters are only used by the ANMT interactions (%s): use one of them, or remove the extra columns", line_number, (int) extras.size() + 5, ANMT_NAMES);
