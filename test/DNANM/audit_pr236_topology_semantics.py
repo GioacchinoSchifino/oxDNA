@@ -5,10 +5,10 @@ Unmodified Erik PR #236 physics. Report failures as diagnostics, not as
 breakage of the unrelated standard DNA2 model. Golden control DNA2 must work.
 """
 from pathlib import Path
-import subprocess, tempfile
+import argparse, subprocess, tempfile
 REPO=Path(__file__).resolve().parents[2]
 
-def run(model, topology):
+def run(model, topology, binary):
     with tempfile.TemporaryDirectory(prefix="pr236-btype-") as tmp:
         d=Path(tmp)
         (d/"system.top").write_text(topology)
@@ -41,17 +41,20 @@ no_stdout_energy = 1
 print_conf_interval = 1
 print_energy_every = 1
 """)
-        p=subprocess.run([str(REPO/"build"/"bin"/"oxDNA"),"input"],
+        p=subprocess.run([str(binary),"input"],
                          cwd=d, capture_output=True, text=True, timeout=45)
         return p.returncode,(d/"log.dat").read_text(errors="replace") if (d/"log.dat").exists() else ""
 
 def main():
+    parser=argparse.ArgumentParser()
+    parser.add_argument("--binary", type=Path, default=REPO/"build"/"bin"/"oxDNA")
+    binary=parser.parse_args().binary.resolve()
     dna_top="2 2 5->3\nA type=DNA circular=false\n(0) type=DNA circular=false\n"
     mixed_top="3 3 2 1 2 5->3\nA type=DNA circular=false\n(0) type=DNA circular=false\nK type=peptide circular=false\n"
-    rc,log=run("DNA2",dna_top)
+    rc,log=run("DNA2",dna_top,binary)
     if rc: raise AssertionError("Standard DNA2 control rejects numeric base, invalid diagnostic: "+log[-900:])
     print("CONTROL PASS: DNA2 accepts new-style (0) base token",flush=True)
-    rc,log=run("DNANM",mixed_top)
+    rc,log=run("DNANM",mixed_top,binary)
     if rc:
         raise AssertionError("DNANM must accept numeric-base tokens like DNA2: "+log[-1000:])
     print("PASS: DNANM and DNA2 both accept a numeric DNA base token",flush=True)
