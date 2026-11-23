@@ -233,6 +233,9 @@ void CUDAANMInteraction<CPUInteraction>::_init_arrays(int N) {
 
 template<class CPUInteraction>
 void CUDAANMInteraction<CPUInteraction>::cuda_init(int N) {
+	if(this->protein_electrostatics_enabled()) {
+		throw oxDNAException("Screened ANM protein electrostatics are CPU-only; CUDA ES-ON forces are not implemented");
+	}
 	CUDABaseInteraction::cuda_init(N);
 
 	if(_update_st) {
