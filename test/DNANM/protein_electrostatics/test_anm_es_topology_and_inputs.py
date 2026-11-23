@@ -158,7 +158,7 @@ class ANMRefactorTopologyAndValidation(unittest.TestCase):
                                 "salt_concentration = 1.0",
                                 f"salt_concentration = {value}",
                             )
-                        return inp + f"\\n{key} = {value}\\n"
+                        return inp + f"\n{key} = {value}\n"
                     proc, log, _ = self._run_raw(
                         root, f"invalid_dh_{number}", input_override=change
                     )
