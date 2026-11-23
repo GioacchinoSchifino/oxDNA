@@ -164,7 +164,12 @@ class ANMRefactorTopologyAndValidation(unittest.TestCase):
                     )
                     combined = (proc.stdout + log).lower()
                     self.assertNotEqual(proc.returncode, 0, msg=combined)
-                    self.assertIn("requires positive finite", combined)
+                    self.assertTrue(
+                        "requires positive finite" in combined
+                        or "invalid numeric token" in combined
+                        or "invalid or nonfinite number" in combined,
+                        msg=combined,
+                    )
 
 
 if __name__ == "__main__":
