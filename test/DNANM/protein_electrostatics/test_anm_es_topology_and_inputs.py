@@ -135,5 +135,37 @@ class ANMRefactorTopologyAndValidation(unittest.TestCase):
             self.assertIn("charge", (proc.stdout + log).lower())
 
 
+    def test_09_inherited_dh_parameters_fail_closed(self):
+        # These values previously reached DNA2's square-root or smoothing
+        # formulas and sometimes produced NaN energies with successful exit.
+        invalid = (
+            ("salt_concentration", "-1"),
+            ("salt_concentration", "nan"),
+            ("salt_concentration", "1e100"),
+            ("dh_strength", "0"),
+            ("dh_strength", "nan"),
+            ("dh_lambda", "0"),
+            ("dh_lambda", "nan"),
+            ("debye_huckel_rhigh", "0"),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for number, (key, value) in enumerate(invalid):
+                with self.subTest(parameter=key, value=value):
+                    def change(inp):
+                        if key == "salt_concentration":
+                            return inp.replace(
+                                "salt_concentration = 1.0",
+                                f"salt_concentration = {value}",
+                            )
+                        return inp + f"\\n{key} = {value}\\n"
+                    proc, log, _ = self._run_raw(
+                        root, f"invalid_dh_{number}", input_override=change
+                    )
+                    combined = (proc.stdout + log).lower()
+                    self.assertNotEqual(proc.returncode, 0, msg=combined)
+                    self.assertIn("requires positive finite", combined)
+
+
 if __name__ == "__main__":
     unittest.main()
