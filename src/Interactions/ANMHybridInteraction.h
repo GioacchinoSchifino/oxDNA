@@ -85,6 +85,9 @@ public:
 		return _anm_topology;
 	}
 
+	// Optional CPU-only extensions advertise their status to CUDA.
+	virtual bool protein_electrostatics_enabled() const { return false; }
+
 	number pair_interaction(BaseParticle *p, BaseParticle *q, bool compute_r = true, bool update_forces = false) override;
 	number pair_interaction_bonded(BaseParticle *p, BaseParticle *q, bool compute_r = true, bool update_forces = false) override;
 	number pair_interaction_nonbonded(BaseParticle *p, BaseParticle *q, bool compute_r = true, bool update_forces = false) override;
