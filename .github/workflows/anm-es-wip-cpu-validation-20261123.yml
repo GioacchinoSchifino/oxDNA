@@ -1,0 +1,44 @@
+name: ANM electrostatics WIP CPU verification (isolated)
+on:
+  push:
+    branches:
+      - validation/es-anm236-cpu-20261123
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cpu-validation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pin and display code provenance
+        run: |
+          git log -1 --format='%H %s'
+          git diff --quiet HEAD || (echo 'Dirty checkout' && exit 1)
+      - name: Configure CPU Release
+        run: cmake -S . -B build -DCUDA=OFF
+      - name: Compile oxDNA CPU
+        run: cmake --build build --target oxDNA --parallel 2
+      - name: CPU screened electrostatics (incl. inherited DH invalid inputs)
+        run: |
+          export OXDNA_BIN="$PWD/build/bin/oxDNA"
+          python3 -m unittest discover -s test/DNANM/protein_electrostatics -p 'test_*.py' -v
+      - name: PR236 existing focused regressions (fail-fast)
+        run: |
+          bash test/DNANM/run_pr236_cpu_regressions.sh \
+            "$PWD/build/bin/oxDNA" "$RUNNER_TEMP/pr236_focused" | tee "$RUNNER_TEMP/pr236_focused_stdout.log"
+          grep -q 'PR236_FOCUSED_CPU_ALL_FOUR_PASS' "$RUNNER_TEMP/pr236_focused_stdout.log"
+      - name: Standard CPU smoke and quick tests
+        run: cmake --build build --target test_run test_quick --parallel 2
+      - name: Upload targeted regression evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: anm-es-wip-cpu-targeted
+          path: |
+            ${{ runner.temp }}/pr236_focused/
+            ${{ runner.temp }}/pr236_focused_stdout.log
+          if-no-files-found: ignore
